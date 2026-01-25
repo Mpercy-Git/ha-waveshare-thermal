@@ -6,6 +6,7 @@ import socket
 import struct
 import threading
 import time
+from threading import Lock
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -110,8 +111,9 @@ class WaveshareThermalCamera(Camera):
         self._port = port
         self._attr_unique_id = unique_id
         self._last_image = self._create_placeholder_image()
+        self._image_lock = Lock()  # Thread-safe image access
         self._running = True
-        self._thread = threading.Thread(target=self._run_worker)
+        self._thread = threading.Thread(target=self._run_worker, name=f"ThermalCamera_{name}")
         self._thread.daemon = True
         self._thread.start()
 
@@ -122,7 +124,8 @@ class WaveshareThermalCamera(Camera):
 
     async def async_camera_image(self, width=None, height=None):
         """Return a still image response from the camera."""
-        return self._last_image
+        with self._image_lock:
+            return self._last_image
 
     def _create_placeholder_image(self):
         """Create a placeholder image."""
@@ -140,14 +143,30 @@ class WaveshareThermalCamera(Camera):
 
     def _run_worker(self):
         """Background thread to read from TCP stream."""
+        reconnect_delay = 5
+        max_reconnect_delay = 60
+        max_buffer_size = HEADER_SIZE + PAYLOAD_SIZE + FOOTER_SIZE * 10  # Allow buffering of up to 10 frames
+        
         while self._running:
             try:
                 # Open socket
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(10.0) # Increased timeout
+                    s.settimeout(30.0)  # Timeout for recv; should be longer than stream interval
                     _LOGGER.info("Attempting to connect to %s:%s", self._host, self._port)
-                    s.connect((self._host, self._port))
+                    try:
+                        s.connect((self._host, self._port))
+                    except socket.timeout:
+                        _LOGGER.error("Connection timed out to %s:%s after 10s. Check if device is powered on and port is correct.", self._host, self._port)
+                        raise
+                    except ConnectionRefusedError:
+                        _LOGGER.error("Connection refused by %s:%s. Device may not be listening on this port.", self._host, self._port)
+                        raise
+                    except OSError as e:
+                        _LOGGER.error("Network error connecting to %s:%s - %s. Check IP address and network connectivity.", self._host, self._port, e)
+                        raise
+                    
                     _LOGGER.info("Successfully connected to thermal camera")
+                    reconnect_delay = 5  # Reset delay on successful connection
                     
                     # Buffer for incoming data
                     data_buffer = b""
@@ -155,83 +174,126 @@ class WaveshareThermalCamera(Camera):
                     # Packet size matches client.js: Header + Payload + Footer
                     # 160 + 10240 + 160 = 10560
                     packet_size = HEADER_SIZE + PAYLOAD_SIZE + FOOTER_SIZE
+                    frame_count = 0
                     
                     while self._running:
-                        chunk = s.recv(4096)
-                        if not chunk:
-                            _LOGGER.warning("Connection closed by remote host")
+                        try:
+                            chunk = s.recv(4096)
+                            if not chunk:
+                                _LOGGER.warning("Connection closed by remote host")
+                                break
+                            data_buffer += chunk
+                            
+                            # Prevent buffer overflow from misbehaving device
+                            if len(data_buffer) > max_buffer_size:
+                                _LOGGER.warning("Buffer overflow detected (%d bytes). Clearing buffer.", len(data_buffer))
+                                data_buffer = b""
+                                continue
+                            
+                            # Log buffer size periodically or on first packet (debug)
+                            if len(data_buffer) < packet_size and len(data_buffer) > 0:
+                                 pass # _LOGGER.debug("Buffering data: %d/%d bytes", len(data_buffer), packet_size)
+                            
+                            while len(data_buffer) >= packet_size:
+                                # _LOGGER.debug("Processing frame, buffer size: %d", len(data_buffer))
+                                # Extract one full frame
+                                frame_packet = data_buffer[:packet_size]
+                                data_buffer = data_buffer[packet_size:]
+                                
+                                try:
+                                    # Parse Payload (skip header)
+                                    raw_data = frame_packet[HEADER_SIZE : HEADER_SIZE + PAYLOAD_SIZE]
+                                    
+                                    # Validate data size
+                                    if len(raw_data) != PAYLOAD_SIZE:
+                                        _LOGGER.warning("Invalid payload size: %d, expected %d", len(raw_data), PAYLOAD_SIZE)
+                                        continue
+                                    
+                                    # Convert to pixels
+                                    pixels = []
+                                    fmt = f"<{len(raw_data)//2}H" # Little-endian unsigned short
+                                    values = struct.unpack(fmt, raw_data)
+                                    
+                                    # Values are 16-bit. 
+                                    # The C code writes 80 * 64 words.
+                                    # We only care about the first 62 lines for the image if the sensor is 80x62.
+                                    # Or maybe the last 2 lines are garbage/metadata? 
+                                    # Client.js uses 80*62*2 as RAW_FRAME_SIZE but reads from a stream that sends more?
+                                    # Client.js: 
+                                    #   RECEIVE BUFFER logic:
+                                    #   const TCP_FRAME_SIZE = RAW_FRAME_SIZE + STRIP_HEAD + STRIP_TAIL; // 10560
+                                    #   Wait, RAW_FRAME_SIZE in client.js is 10240??
+                                    #     const RAW_FRAME_SIZE = FRAME_WIDTH * FRAME_HEIGHT * 2; // 10240
+                                    #     80 * 62 * 2 = 9920. 
+                                    #     10240 / 2 / 80 = 64.
+                                    #   So client.js defines HEIGHT=62 but calculates size as if HEIGHT=64?
+                                    #   No, client.js line 10: "const RAW_FRAME_SIZE = FRAME_WIDTH * FRAME_HEIGHT * 2; // 10240 bytes"
+                                    #   This comment is contradictory if W=80, H=62. 80*62*2 = 9920.
+                                    #   Let's assume the STREAM sends 64 lines, and we can just visualize all of them or crop.
+                                    
+                                    min_val = min(values)
+                                    max_val = max(values)
+                                    
+                                    # Create Image
+                                    img = Image.new('RGB', (BUFFER_WIDTH, BUFFER_HEIGHT))
+                                    pixels_rgb = [get_color(v, min_val, max_val) for v in values]
+                                    img.putdata(pixels_rgb)
+                                    
+                                    # Crop if necessary (The wiki says 80x62)
+                                    if ACTUAL_HEIGHT < BUFFER_HEIGHT:
+                                        img = img.crop((0, 0, BUFFER_WIDTH, ACTUAL_HEIGHT))
+                                    
+                                    # Resize for better visibility in HA (Optional, but 80px is tiny)
+                                    img = img.resize((320, 248), resample=Image.NEAREST)
+                                    
+                                    # Draw stats
+                                    draw = ImageDraw.Draw(img)
+                                    # Convert raw to celsius: val * 0.0984 - 265.82 (from client.js)
+                                    min_temp = min_val * 0.0984 - 265.82
+                                    max_temp = max_val * 0.0984 - 265.82
+                                    
+                                    text = f"Min: {min_temp:.1f}C  Max: {max_temp:.1f}C"
+                                    draw.text((5, 5), text, fill=(255, 255, 255))
+                                    
+                                    # Save to byte buffer
+                                    b_io = io.BytesIO()
+                                    img.save(b_io, 'JPEG', quality=90)
+                                    
+                                    # Thread-safe image update
+                                    with self._image_lock:
+                                        self._last_image = b_io.getvalue()
+                                    
+                                    frame_count += 1
+                                    if frame_count % 30 == 0:
+                                        _LOGGER.debug("Processed %d frames successfully", frame_count)
+                                        
+                                except struct.error as e:
+                                    _LOGGER.error("Failed to unpack frame data: %s", e)
+                                    continue
+                                except Exception as e:
+                                    _LOGGER.error("Error processing frame: %s", e)
+                                    continue
+                        
+                        except socket.timeout:
+                            _LOGGER.warning("No data received for 30 seconds. Reconnecting...")
                             break
-                        data_buffer += chunk
-                        
-                        # Log buffer size periodically or on first packet (debug)
-                        if len(data_buffer) < packet_size and len(data_buffer) > 0:
-                             pass # _LOGGER.debug("Buffering data: %d/%d bytes", len(data_buffer), packet_size)
-                        
-                        while len(data_buffer) >= packet_size:
-                            # _LOGGER.debug("Processing frame, buffer size: %d", len(data_buffer))
-                            # Extract one full frame
-                            frame_packet = data_buffer[:packet_size]
-                            data_buffer = data_buffer[packet_size:]
-                            
-                            # Parse Payload (skip header)
-                            raw_data = frame_packet[HEADER_SIZE : HEADER_SIZE + PAYLOAD_SIZE]
-                            
-                            # Convert to pixels
-                            pixels = []
-                            fmt = f"<{len(raw_data)//2}H" # Little-endian unsigned short
-                            values = struct.unpack(fmt, raw_data)
-                            
-                            # Values are 16-bit. 
-                            # The C code writes 80 * 64 words.
-                            # We only care about the first 62 lines for the image if the sensor is 80x62.
-                            # Or maybe the last 2 lines are garbage/metadata? 
-                            # Client.js uses 80*62*2 as RAW_FRAME_SIZE but reads from a stream that sends more?
-                            # Client.js: 
-                            #   RECEIVE BUFFER logic:
-                            #   const TCP_FRAME_SIZE = RAW_FRAME_SIZE + STRIP_HEAD + STRIP_TAIL; // 10560
-                            #   Wait, RAW_FRAME_SIZE in client.js is 10240??
-                            #     const RAW_FRAME_SIZE = FRAME_WIDTH * FRAME_HEIGHT * 2; // 10240
-                            #     80 * 62 * 2 = 9920. 
-                            #     10240 / 2 / 80 = 64.
-                            #   So client.js defines HEIGHT=62 but calculates size as if HEIGHT=64?
-                            #   No, client.js line 10: "const RAW_FRAME_SIZE = FRAME_WIDTH * FRAME_HEIGHT * 2; // 10240 bytes"
-                            #   This comment is contradictory if W=80, H=62. 80*62*2 = 9920.
-                            #   Let's assume the STREAM sends 64 lines, and we can just visualize all of them or crop.
-                            
-                            min_val = min(values)
-                            max_val = max(values)
-                            
-                            # Create Image
-                            img = Image.new('RGB', (BUFFER_WIDTH, BUFFER_HEIGHT))
-                            pixels_rgb = [get_color(v, min_val, max_val) for v in values]
-                            img.putdata(pixels_rgb)
-                            
-                            # Crop if necessary (The wiki says 80x62)
-                            if ACTUAL_HEIGHT < BUFFER_HEIGHT:
-                                img = img.crop((0, 0, BUFFER_WIDTH, ACTUAL_HEIGHT))
-                            
-                            # Resize for better visibility in HA (Optional, but 80px is tiny)
-                            img = img.resize((320, 248), resample=Image.NEAREST)
-                            
-                            # Draw stats
-                            draw = ImageDraw.Draw(img)
-                            # Convert raw to celsius: val * 0.0984 - 265.82 (from client.js)
-                            min_temp = min_val * 0.0984 - 265.82
-                            max_temp = max_val * 0.0984 - 265.82
-                            
-                            text = f"Min: {min_temp:.1f}C  Max: {max_temp:.1f}C"
-                            draw.text((5, 5), text, fill=(255, 255, 255))
-                            
-                            # Save to byte buffer
-                            b_io = io.BytesIO()
-                            img.save(b_io, 'JPEG', quality=90)
-                            self._last_image = b_io.getvalue()
-                            # _LOGGER.debug("Frame processed successfully")
+                        except Exception as e:
+                            _LOGGER.error("Socket recv error: %s", e)
+                            break
                             
             except Exception as e:
                 _LOGGER.error("Error connecting to thermal camera: %s", e)
-                time.sleep(5)  # Wait before reconnecting
+                if self._running:
+                    _LOGGER.info("Reconnecting in %d seconds...", reconnect_delay)
+                    time.sleep(reconnect_delay)
+                    # Exponential backoff: increase delay up to max
+                    reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
+                    reconnect_delay = int(reconnect_delay)
 
     def stop(self):
         """Stop the background thread."""
         self._running = False
+        # Wait for thread to finish (max 5 seconds)
+        self._thread.join(timeout=5)
+        if self._thread.is_alive():
+            _LOGGER.warning("Thermal camera thread did not stop cleanly")

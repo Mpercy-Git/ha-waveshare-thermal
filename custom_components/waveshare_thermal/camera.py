@@ -42,7 +42,7 @@ RAW_FRAME_SIZE = FRAME_WIDTH * FRAME_HEIGHT * 2  # 80 * 62 * 2 = 9920 bytes?
 # Let's use 80x64 for the buffer read to align with the C code send size (10240).
 
 BUFFER_WIDTH = 80
-BUFFER_HEIGHT = 64 # Based on C code send size
+BUFFER_HEIGHT = 62 # Corrected from 64 based on Protocol (80x62)
 ACTUAL_HEIGHT = 62
 
 PAYLOAD_SIZE = BUFFER_WIDTH * BUFFER_HEIGHT * 2 # 10240
@@ -109,7 +109,7 @@ class WaveshareThermalCamera(Camera):
         self._host = host
         self._port = port
         self._attr_unique_id = unique_id
-        self._last_image = None
+        self._last_image = self._create_placeholder_image()
         self._running = True
         self._thread = threading.Thread(target=self._run_worker)
         self._thread.daemon = True
@@ -123,6 +123,20 @@ class WaveshareThermalCamera(Camera):
     async def async_camera_image(self, width=None, height=None):
         """Return a still image response from the camera."""
         return self._last_image
+
+    def _create_placeholder_image(self):
+        """Create a placeholder image."""
+        try:
+            img = Image.new('RGB', (320, 248), color=(40, 44, 52))
+            draw = ImageDraw.Draw(img)
+            # Simple fallback if font loading fails, though default is usually fine
+            draw.text((80, 110), "Connecting...", fill=(255, 255, 255))
+            b_io = io.BytesIO()
+            img.save(b_io, 'JPEG', quality=80)
+            return b_io.getvalue()
+        except Exception as e:
+            _LOGGER.error("Error creating placeholder image: %s", e)
+            return None
 
     def _run_worker(self):
         """Background thread to read from TCP stream."""

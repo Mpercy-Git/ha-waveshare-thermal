@@ -21,10 +21,6 @@ from .const import DEFAULT_PORT, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-# Startup command to send to ESP32 to trigger streaming
-# Format: "   #2808GFRA" (12 bytes) + padding to 49 bytes
-STARTUP_CMD = b"   #2808GFRA" + (b"\x00" * 37)  # Pad to 49 bytes as expected by tcpServerGet
-
 FRAME_WIDTH = 80
 FRAME_HEIGHT = 62
 RAW_FRAME_SIZE = FRAME_WIDTH * FRAME_HEIGHT * 2  # 80 * 62 * 2 = 9920 bytes? 
@@ -174,7 +170,7 @@ class WaveshareThermalCamera(Camera):
             try:
                 # Open socket
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(30.0)  # Connection timeout
+                    s.settimeout(10.0)  # Connection timeout
                     _LOGGER.info("Attempting to connect to %s:%s", self._host, self._port)
                     try:
                         s.connect((self._host, self._port))
@@ -189,18 +185,11 @@ class WaveshareThermalCamera(Camera):
                         raise
                     
                     _LOGGER.info("Successfully connected to thermal camera at %s:%s", self._host, self._port)
+                    _LOGGER.info("Thermal stream should start automatically. Waiting for data...")
                     reconnect_delay = 5  # Reset delay on successful connection
                     
-                    # Send startup command to trigger streaming on ESP32
-                    try:
-                        bytes_sent = s.sendall(STARTUP_CMD)
-                        _LOGGER.info("Sent %d-byte startup command: %s", len(STARTUP_CMD), STARTUP_CMD[:12])
-                    except Exception as e:
-                        _LOGGER.error("Failed to send startup command: %s", e)
-                        raise
-                    
-                    # Set a longer timeout for receiving data (some devices may have slower stream)
-                    s.settimeout(60.0)  # Wait up to 60 seconds for first data
+                    # The firmware automatically starts streaming when a client connects.
+                    # No startup command needed - just wait for data.
                     
                     # Buffer for incoming data
                     data_buffer = b""

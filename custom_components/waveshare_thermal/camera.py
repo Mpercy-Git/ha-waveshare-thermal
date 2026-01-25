@@ -146,7 +146,7 @@ class WaveshareThermalCamera(Camera):
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.settimeout(5.0)
                     s.connect((self._host, self._port))
-                    _LOGGER.info("Connected to thermal camera at %s", self._host)
+                    _LOGGER.info("Connected to thermal camera at %s:%s", self._host, self._port)
                     
                     # Buffer for incoming data
                     data_buffer = b""
@@ -158,10 +158,16 @@ class WaveshareThermalCamera(Camera):
                     while self._running:
                         chunk = s.recv(4096)
                         if not chunk:
+                            _LOGGER.warning("Connection closed by remote host")
                             break
                         data_buffer += chunk
                         
+                        # Log buffer size periodically or on first packet (debug)
+                        if len(data_buffer) < packet_size and len(data_buffer) > 0:
+                             pass # _LOGGER.debug("Buffering data: %d/%d bytes", len(data_buffer), packet_size)
+                        
                         while len(data_buffer) >= packet_size:
+                            # _LOGGER.debug("Processing frame, buffer size: %d", len(data_buffer))
                             # Extract one full frame
                             frame_packet = data_buffer[:packet_size]
                             data_buffer = data_buffer[packet_size:]
@@ -219,6 +225,7 @@ class WaveshareThermalCamera(Camera):
                             b_io = io.BytesIO()
                             img.save(b_io, 'JPEG', quality=90)
                             self._last_image = b_io.getvalue()
+                            # _LOGGER.debug("Frame processed successfully")
                             
             except Exception as e:
                 _LOGGER.error("Error connecting to thermal camera: %s", e)

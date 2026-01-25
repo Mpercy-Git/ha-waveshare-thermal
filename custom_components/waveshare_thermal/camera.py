@@ -23,30 +23,13 @@ _LOGGER = logging.getLogger(__name__)
 
 FRAME_WIDTH = 80
 FRAME_HEIGHT = 62
-RAW_FRAME_SIZE = FRAME_WIDTH * FRAME_HEIGHT * 2  # 80 * 62 * 2 = 9920 bytes? 
-# Wait, wiki says 80x62. TCP Client js says 80x62.
-# 80 * 62 = 4960 pixels.
-# 4960 * 2 bytes = 9920 bytes.
-# HOWEVER, tcpServerTask.c says:
-# mMemcpySize = 80 * 64; //(80 words + 4 words)?? 
-# mTxSize = 10256; 
-# And: tcpServerSend((uint8_t*)senxorDataPtr, 80 * 64 * sizeof(uint16_t)); // 10240 bytes
-# Client.js says:
-# const FRAME_WIDTH = 80;
-# const FRAME_HEIGHT = 62;
-# const RAW_FRAME_SIZE = FRAME_WIDTH * FRAME_HEIGHT * 2; // 9920
-# Wait, client.js line 10 says: const RAW_FRAME_SIZE = FRAME_WIDTH * FRAME_HEIGHT * 2; // 10240 bytes
-# 80 * 62 * 2 = 9920. 
-# 80 * 64 * 2 = 10240.
-# The C code sends 80 * 64.  Let's trust the C code and the client.js comment (even if the math in the comment vs code is slightly off or implies padded lines).
-# If the sensor is 80x62, maybe there are 2 dummy lines or it's actually 80x64.
-# Let's use 80x64 for the buffer read to align with the C code send size (10240).
-
 BUFFER_WIDTH = 80
-BUFFER_HEIGHT = 62 # Corrected from 64 based on Protocol (80x62)
-ACTUAL_HEIGHT = 62
+BUFFER_HEIGHT = 64  # Firmware sends 80*64 (10240 bytes), not 80*62
+ACTUAL_HEIGHT = 62  # But only display first 62 rows
 
-PAYLOAD_SIZE = BUFFER_WIDTH * BUFFER_HEIGHT * 2 # 10240
+# Payload is just raw thermal data: 80 * 64 * 2 bytes = 10240 bytes (no headers/footers)
+PAYLOAD_SIZE = BUFFER_WIDTH * BUFFER_HEIGHT * 2  # 10240 bytes
+# Inferno-ish colormap (interpolated)
 HEADER_SIZE = 160  # STRIP_HEAD in client.js is 160?? client.js says 160.
 FOOTER_SIZE = 160  # STRIP_TAIL in client.js.
 
@@ -188,16 +171,14 @@ class WaveshareThermalCamera(Camera):
                     _LOGGER.info("Thermal stream should start automatically. Waiting for data...")
                     reconnect_delay = 5  # Reset delay on successful connection
                     
-                    # The firmware automatically starts streaming when a client connects.
-                    # No startup command needed - just wait for data.
+                    # Packet is JUST raw thermal data: 10240 bytes
+                    # No headers or footers
+                    packet_size = PAYLOAD_SIZE
+                    frame_count = 0
+                    first_data_received = False
                     
                     # Buffer for incoming data
                     data_buffer = b""
-                    
-                    # Packet size matches client.js: Header + Payload + Footer
-                    # 160 + 10240 + 160 = 10560
-                    packet_size = HEADER_SIZE + PAYLOAD_SIZE + FOOTER_SIZE
-                    frame_count = 0
                     
                     while self._running:
                         try:
@@ -219,13 +200,17 @@ class WaveshareThermalCamera(Camera):
                             
                             while len(data_buffer) >= packet_size:
                                 # _LOGGER.debug("Processing frame, buffer size: %d", len(data_buffer))
-                                # Extract one full frame
+                                # Extract one full frame (just raw data, no header/footer)
                                 frame_packet = data_buffer[:packet_size]
                                 data_buffer = data_buffer[packet_size:]
                                 
+                                if not first_data_received:
+                                    _LOGGER.info("Received first thermal frame! Data is flowing.")
+                                    first_data_received = True
+                                
                                 try:
-                                    # Parse Payload (skip header)
-                                    raw_data = frame_packet[HEADER_SIZE : HEADER_SIZE + PAYLOAD_SIZE]
+                                    # Parse raw thermal data (no headers to skip)
+                                    raw_data = frame_packet
                                     
                                     # Validate data size
                                     if len(raw_data) != PAYLOAD_SIZE:

@@ -144,8 +144,8 @@ class WaveshareThermalCamera(Camera):
             try:
                 # Open socket
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(5.0)
-                    _LOGGER.debug("Attempting to connect to %s:%s", self._host, self._port)
+                    s.settimeout(10.0) # Increased timeout
+                    _LOGGER.info("Attempting to connect to %s:%s", self._host, self._port)
                     s.connect((self._host, self._port))
                     _LOGGER.info("Successfully connected to thermal camera")
                     

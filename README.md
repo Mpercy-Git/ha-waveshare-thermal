@@ -3,10 +3,12 @@
 Custom component to integrate the [Waveshare ESP32 Thermal Camera](https://www.waveshare.com/wiki/Thermal_Camera_ESP32_Module) into Home Assistant.
 
 ## Features
-- **Live Thermal View**: Streams thermal data from the ESP32 module.
-- **Temperature Stats**: Displays real-time Minimum and Maximum temperatures on the image.
-- **False Color**: Applies an "Inferno" style colormap to valid thermal data.
+- **Live Thermal View**: Streams thermal data from the ESP32 module as a camera feed.
+- **Temperature Sensors**: Real-time minimum and maximum temperature readings exposed as Home Assistant sensor entities.
+- **Temperature Stats**: Displays min/max temperatures on the live image feed.
+- **False Color Imaging**: Applies an "Inferno" style colormap to thermal data for better visualization.
 - **Snapshot Support**: Generates valid JPEG snapshots for notifications or UI.
+- **Auto-Reconnection**: Implements exponential backoff reconnection strategy with detailed error logging.
 
 ## Requirements
 - **Hardware**: Waveshare Thermal Camera ESP32 Module.
@@ -14,6 +16,7 @@ Custom component to integrate the [Waveshare ESP32 Thermal Camera](https://www.w
 - **Network**: The device must be connected to your local network (Station Mode) or accessible via its AP.
     - **Default Port**: `3333`
     - **Recommended Resolution**: 80x62 (Device default)
+    - **Network Type**: Ethernet or Wi-Fi (2.4GHz recommended)
 
 ## Installation
 
@@ -39,22 +42,81 @@ Custom component to integrate the [Waveshare ESP32 Thermal Camera](https://www.w
 5.  (Optional) Change the port if modified (Default: `3333`).
 6.  Click **Submit**.
 
+## Entities
+
+After successful configuration, the integration creates:
+
+### Camera
+- **`camera.thermal_camera`** - Live thermal video feed with temperature overlay
+
+### Sensors
+- **`sensor.thermal_camera_min_temperature`** - Minimum temperature from current frame (°C)
+- **`sensor.thermal_camera_max_temperature`** - Maximum temperature from current frame (°C)
+
+These sensors update in real-time as new thermal frames are received.
+
 ## Troubleshooting
 
-### Stuck on "Connecting..."
-If the camera image shows a "Connecting..." placeholder indefinitely:
+### Stuck on "Connecting..." or "No data received for 30 seconds"
+If the camera image shows a "Connecting..." placeholder or reconnects every 30 seconds:
+
 1.  **Check Network**: Ensure the camera is connected to Wi-Fi and reachable from your Home Assistant server.
     - Try `ping <camera_ip>` from a terminal.
     - If connecting via the camera's AP, ensure HA is connected to that specific Wi-Fi network.
-2.  **Check Mode**: The camera works best in Station Mode (connected to your Router). If using AP mode, it may have limited range or single-connection limits.
-3.  **Logs**: Check `Settings` > `System` > `Logs` for "waveshare_thermal". structure.
-    - Look for `Attempting to connect to ...` to verify the ID/Port.
-    - Look for `Error connecting: timed out` which indicates network blockage.
+    
+2.  **Check Firmware**: Ensure the ESP32 is running the thermal camera firmware that implements TCP streaming.
+    - The firmware must listen on port 3333 and respond to startup command `"   #2808GFRA"`.
+    
+3.  **Check Mode**: The camera works best in Station Mode (connected to your Router). If using AP mode, it may have limited range or single-connection limits.
 
-### "Senxor not connected"
-If using the official viewer concurrently:
-- The device may only support **one active connection**. Close the official viewer before using Home Assistant.
+4.  **Check Logs**: Go to **Settings** > **System** > **Logs** and search for "waveshare_thermal":
+    - Look for `Attempting to connect to <IP>:<PORT>` to verify correct IP/port.
+    - Look for `Successfully connected to thermal camera` and `Sent startup command` - these indicate the handshake succeeded.
+    - Look for `Error connecting: Connection refused` - indicates device isn't listening on the port.
+    - Look for `Error connecting: Network error` - indicates unreachable IP address.
 
-### Corrupt Images / Drift
-- This integration is tuned for the standard 80x62 resolution (Total packet size 10240 bytes).
-- If you see scrolling or garbled pixels, your firmware might be sending a different packet size. Report this in an issue.
+### "Connection refused" Error
+- The device is reachable but not listening on port 3333.
+- Verify firmware is properly installed and running on the ESP32.
+- Try power cycling the device.
+
+### Corrupt Images or Pixel Drift
+- This integration is tuned for the standard 80x62 resolution (10240 bytes per frame).
+- If you see scrolling or garbled pixels, the firmware might be sending a different packet size.
+- Check the [Waveshare documentation](https://www.waveshare.com/wiki/Thermal_Camera_ESP32_Module) for firmware updates.
+
+### Only One Connection Supported
+- Some firmware versions only allow a single simultaneous connection.
+- Close the official Waveshare viewer or other connections before using Home Assistant.
+- The integration will maintain the connection with automatic reconnection on failure.
+
+## Advanced
+
+### Temperature Conversion
+Temperatures are converted from raw sensor values using the formula:
+```
+Temperature (°C) = (Raw Value × 0.0984) - 265.82
+```
+
+This formula is derived from the sensor's specification and matches the official Waveshare client implementation.
+
+### Frame Format
+- **Resolution**: 80×62 pixels (standard)
+- **Data Format**: Raw 16-bit unsigned integers (little-endian)
+- **Packet Structure**: 160-byte header + 10240 bytes payload + 160-byte footer
+- **Update Rate**: Depends on firmware (typically 15-30 FPS)
+
+## Known Limitations
+- Only one active TCP connection supported per device (firmware limitation).
+- Temperature readings reflect the current frame only; no historical data stored.
+- Requires local network access; cloud remote viewing not supported in this component.
+
+## Support
+For issues, feature requests, or questions:
+1. Check the troubleshooting section above.
+2. Review [Home Assistant Logs](https://www.home-assistant.io/docs/configuration/troubleshooting/) for detailed error messages.
+3. Open an issue on the GitHub repository with:
+   - Integration version
+   - Error logs from Home Assistant
+   - Network topology (is the device on same subnet as HA?)
+   - Firmware version of the thermal camera (if known)

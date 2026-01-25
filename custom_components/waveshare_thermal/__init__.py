@@ -32,10 +32,13 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: config_entries.ConfigEntry) -> bool:
     """Set up from a config entry."""
-    await hass.config_entries.async_forward_entry_setups(entry, [Platform.CAMERA])
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN].setdefault("entities", {})
+    
+    await hass.config_entries.async_forward_entry_setups(entry, [Platform.CAMERA, Platform.SENSOR])
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: config_entries.ConfigEntry) -> bool:
     """Unload a config entry."""
-    return await hass.config_entries.async_unload_platforms(entry, [Platform.CAMERA])
+    return await hass.config_entries.async_unload_platforms(entry, [Platform.CAMERA, Platform.SENSOR])
 

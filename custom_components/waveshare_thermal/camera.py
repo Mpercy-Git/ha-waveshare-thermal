@@ -100,7 +100,13 @@ async def async_setup_entry(
     port = entry.data.get(CONF_PORT, DEFAULT_PORT)
     name = entry.data.get(CONF_NAME) or entry.title
 
-    async_add_entities([WaveshareThermalCamera(hass, name, host, port, entry.entry_id)])
+    camera = WaveshareThermalCamera(hass, name, host, port, entry.entry_id)
+    
+    # Store camera reference for sensors to access
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN].setdefault("entities", {})[entry.entry_id] = camera
+    
+    async_add_entities([camera])
 
 
 class WaveshareThermalCamera(Camera):
@@ -116,6 +122,9 @@ class WaveshareThermalCamera(Camera):
         self._attr_unique_id = unique_id
         self._last_image = self._create_placeholder_image()
         self._image_lock = Lock()  # Thread-safe image access
+        self._min_temp = 0.0
+        self._max_temp = 0.0
+        self._temp_lock = Lock()  # Thread-safe temperature access
         self._running = True
         self._thread = threading.Thread(target=self._run_worker, name=f"ThermalCamera_{name}")
         self._thread.daemon = True
@@ -125,6 +134,16 @@ class WaveshareThermalCamera(Camera):
     def name(self):
         """Return the name of this camera."""
         return self._name
+
+    def get_min_temp(self):
+        """Get minimum temperature."""
+        with self._temp_lock:
+            return self._min_temp
+
+    def get_max_temp(self):
+        """Get maximum temperature."""
+        with self._temp_lock:
+            return self._max_temp
 
     async def async_camera_image(self, width=None, height=None):
         """Return a still image response from the camera."""
@@ -155,12 +174,12 @@ class WaveshareThermalCamera(Camera):
             try:
                 # Open socket
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(30.0)  # Timeout for recv; should be longer than stream interval
+                    s.settimeout(30.0)  # Connection timeout
                     _LOGGER.info("Attempting to connect to %s:%s", self._host, self._port)
                     try:
                         s.connect((self._host, self._port))
                     except socket.timeout:
-                        _LOGGER.error("Connection timed out to %s:%s after 10s. Check if device is powered on and port is correct.", self._host, self._port)
+                        _LOGGER.error("Connection timed out to %s:%s after 30s. Check if device is powered on and port is correct.", self._host, self._port)
                         raise
                     except ConnectionRefusedError:
                         _LOGGER.error("Connection refused by %s:%s. Device may not be listening on this port.", self._host, self._port)
@@ -169,16 +188,19 @@ class WaveshareThermalCamera(Camera):
                         _LOGGER.error("Network error connecting to %s:%s - %s. Check IP address and network connectivity.", self._host, self._port, e)
                         raise
                     
-                    _LOGGER.info("Successfully connected to thermal camera")
+                    _LOGGER.info("Successfully connected to thermal camera at %s:%s", self._host, self._port)
                     reconnect_delay = 5  # Reset delay on successful connection
                     
                     # Send startup command to trigger streaming on ESP32
                     try:
-                        s.sendall(STARTUP_CMD)
-                        _LOGGER.info("Sent startup command to trigger thermal stream")
+                        bytes_sent = s.sendall(STARTUP_CMD)
+                        _LOGGER.info("Sent %d-byte startup command: %s", len(STARTUP_CMD), STARTUP_CMD[:12])
                     except Exception as e:
                         _LOGGER.error("Failed to send startup command: %s", e)
                         raise
+                    
+                    # Set a longer timeout for receiving data (some devices may have slower stream)
+                    s.settimeout(60.0)  # Wait up to 60 seconds for first data
                     
                     # Buffer for incoming data
                     data_buffer = b""
@@ -275,6 +297,11 @@ class WaveshareThermalCamera(Camera):
                                     with self._image_lock:
                                         self._last_image = b_io.getvalue()
                                     
+                                    # Thread-safe temperature update
+                                    with self._temp_lock:
+                                        self._min_temp = min_temp
+                                        self._max_temp = max_temp
+                                    
                                     frame_count += 1
                                     if frame_count % 30 == 0:
                                         _LOGGER.debug("Processed %d frames successfully", frame_count)
@@ -287,7 +314,7 @@ class WaveshareThermalCamera(Camera):
                                     continue
                         
                         except socket.timeout:
-                            _LOGGER.warning("No data received for 30 seconds. Reconnecting...")
+                            _LOGGER.warning("No data received for 60 seconds. Device may not be sending thermal stream. Reconnecting...")
                             break
                         except Exception as e:
                             _LOGGER.error("Socket recv error: %s", e)

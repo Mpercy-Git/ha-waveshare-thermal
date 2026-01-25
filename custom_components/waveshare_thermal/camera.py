@@ -147,7 +147,7 @@ class WaveshareThermalCamera(Camera):
         """Background thread to read from TCP stream."""
         reconnect_delay = 5
         max_reconnect_delay = 60
-        max_buffer_size = HEADER_SIZE + PAYLOAD_SIZE + FOOTER_SIZE * 10  # Allow buffering of up to 10 frames
+        max_buffer_size = PAYLOAD_SIZE * 10  # Allow buffering of up to 10 frames
         
         while self._running:
             try:
@@ -158,7 +158,7 @@ class WaveshareThermalCamera(Camera):
                     try:
                         s.connect((self._host, self._port))
                     except socket.timeout:
-                        _LOGGER.error("Connection timed out to %s:%s after 30s. Check if device is powered on and port is correct.", self._host, self._port)
+                        _LOGGER.error("Connection timed out to %s:%s after 10s. Check if device is powered on and port is correct.", self._host, self._port)
                         raise
                     except ConnectionRefusedError:
                         _LOGGER.error("Connection refused by %s:%s. Device may not be listening on this port.", self._host, self._port)
@@ -171,6 +171,13 @@ class WaveshareThermalCamera(Camera):
                     _LOGGER.info("Thermal stream should start automatically. Waiting for data...")
                     reconnect_delay = 5  # Reset delay on successful connection
                     
+                    # Set socket options for stability
+                    try:
+                        s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                        _LOGGER.debug("Enabled TCP keep-alive")
+                    except Exception as e:
+                        _LOGGER.debug("Could not set socket options: %s", e)
+                    
                     # Packet is JUST raw thermal data: 10240 bytes
                     # No headers or footers
                     packet_size = PAYLOAD_SIZE
@@ -180,12 +187,20 @@ class WaveshareThermalCamera(Camera):
                     # Buffer for incoming data
                     data_buffer = b""
                     
+                    # Set recv timeout to 60 seconds - device may take time to initialize sensor
+                    s.settimeout(60.0)
+                    
                     while self._running:
                         try:
                             chunk = s.recv(4096)
                             if not chunk:
                                 _LOGGER.warning("Connection closed by remote host")
                                 break
+                            
+                            if not first_data_received:
+                                _LOGGER.info("Received first data packet (%d bytes). Device is streaming!", len(chunk))
+                                first_data_received = True
+                            
                             data_buffer += chunk
                             
                             # Prevent buffer overflow from misbehaving device
@@ -203,10 +218,6 @@ class WaveshareThermalCamera(Camera):
                                 # Extract one full frame (just raw data, no header/footer)
                                 frame_packet = data_buffer[:packet_size]
                                 data_buffer = data_buffer[packet_size:]
-                                
-                                if not first_data_received:
-                                    _LOGGER.info("Received first thermal frame! Data is flowing.")
-                                    first_data_received = True
                                 
                                 try:
                                     # Parse raw thermal data (no headers to skip)

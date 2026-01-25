@@ -21,6 +21,10 @@ from .const import DEFAULT_PORT, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
+# Startup command to send to ESP32 to trigger streaming
+# Format: "   #2808GFRA" (12 bytes) + padding to 49 bytes
+STARTUP_CMD = b"   #2808GFRA" + (b"\x00" * 37)  # Pad to 49 bytes as expected by tcpServerGet
+
 FRAME_WIDTH = 80
 FRAME_HEIGHT = 62
 RAW_FRAME_SIZE = FRAME_WIDTH * FRAME_HEIGHT * 2  # 80 * 62 * 2 = 9920 bytes? 
@@ -167,6 +171,14 @@ class WaveshareThermalCamera(Camera):
                     
                     _LOGGER.info("Successfully connected to thermal camera")
                     reconnect_delay = 5  # Reset delay on successful connection
+                    
+                    # Send startup command to trigger streaming on ESP32
+                    try:
+                        s.sendall(STARTUP_CMD)
+                        _LOGGER.info("Sent startup command to trigger thermal stream")
+                    except Exception as e:
+                        _LOGGER.error("Failed to send startup command: %s", e)
+                        raise
                     
                     # Buffer for incoming data
                     data_buffer = b""

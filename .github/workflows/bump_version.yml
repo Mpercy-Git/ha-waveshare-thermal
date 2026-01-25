@@ -1,0 +1,35 @@
+name: Bump Version
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'New Version (e.g., 1.0.2)'
+        required: true
+        type: string
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Update manifest.json
+        run: |
+          VERSION="${{ inputs.version }}"
+          # Use jq to update the version field safely
+          tmp=$(mktemp)
+          jq --arg v "$VERSION" '.version = $v' custom_components/waveshare_thermal/manifest.json > "$tmp" && mv "$tmp" custom_components/waveshare_thermal/manifest.json
+          
+      - name: Commit and Push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add custom_components/waveshare_thermal/manifest.json
+          git commit -m "Bump version to ${{ inputs.version }}"
+          git tag "v${{ inputs.version }}"
+          git push
+          git push origin "v${{ inputs.version }}"

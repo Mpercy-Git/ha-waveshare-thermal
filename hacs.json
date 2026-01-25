@@ -1,6 +1,5 @@
 {
     "name": "Waveshare Thermal Camera",
     "render_readme": true,
-    "content_in_root": false,
-    "filename": "waveshare_thermal.zip"
+    "content_in_root": false
 }

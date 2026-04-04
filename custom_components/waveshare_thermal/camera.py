@@ -256,21 +256,33 @@ class WaveshareThermalCamera(Camera):
                                     
                                     # Convert to pixels
                                     # Firmware sends 80x64 array (5120 uint16 values)
-                                    # We display only first 62 rows (80x62 = 4960 pixels)
+                                    # First row (80 pixels) often contains garbage - skip it
                                     fmt = f"<{len(raw_data)//2}H"  # Little-endian unsigned short
-                                    values = struct.unpack(fmt, raw_data)
+                                    all_values = struct.unpack(fmt, raw_data)
                                     
-                                    min_val = min(values)
-                                    max_val = max(values)
+                                    # Skip first row (80 pixels) and get clean thermal data
+                                    values = all_values[80:]  # Start from row 2 (pixel 80 onwards)
                                     
-                                    # Create Image
-                                    img = Image.new('RGB', (BUFFER_WIDTH, BUFFER_HEIGHT))
+                                    # Filter out zero values for temperature calculation
+                                    # (zeros are sensor errors, not real temperatures)
+                                    valid_values = [v for v in values if v > 0]
+                                    
+                                    if valid_values:
+                                        min_val = min(valid_values)
+                                        max_val = max(valid_values)
+                                    else:
+                                        # Fallback if all values are zero (shouldn't happen)
+                                        min_val = 0
+                                        max_val = 65535
+                                    
+                                    # Create Image from clean data (skip first row)
+                                    # This gives us 63 rows, then we'll crop to 62
+                                    img = Image.new('RGB', (BUFFER_WIDTH, BUFFER_HEIGHT - 1))  # 80x63
                                     pixels_rgb = [get_color(v, min_val, max_val) for v in values]
                                     img.putdata(pixels_rgb)
                                     
-                                    # Crop if necessary (The wiki says 80x62)
-                                    if ACTUAL_HEIGHT < BUFFER_HEIGHT:
-                                        img = img.crop((0, 0, BUFFER_WIDTH, ACTUAL_HEIGHT))
+                                    # Crop to standard 80x62 display size
+                                    img = img.crop((0, 0, BUFFER_WIDTH, ACTUAL_HEIGHT))
                                     
                                     # Resize for better visibility in HA (Optional, but 80px is tiny)
                                     img = img.resize((320, 248), resample=Image.NEAREST)

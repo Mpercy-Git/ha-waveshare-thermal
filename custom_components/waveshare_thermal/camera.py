@@ -207,9 +207,12 @@ class WaveshareThermalCamera(Camera):
                         _LOGGER.warning("Error during handshake: %s (continuing anyway)", e)
                     
                     # Frame format: 16-byte header + 10240-byte thermal data = 10256 bytes
+                    # Frame header signature: b"   #2808GFRA" (first 12 bytes)
                     packet_size = FRAME_SIZE
+                    frame_header_signature = b"   #2808GFRA"
                     frame_count = 0
                     first_data_received = False
+                    synchronized = False
                     
                     # Buffer for incoming data
                     data_buffer = b""
@@ -234,15 +237,41 @@ class WaveshareThermalCamera(Camera):
                             if len(data_buffer) > max_buffer_size:
                                 _LOGGER.warning("Buffer overflow detected (%d bytes). Clearing buffer.", len(data_buffer))
                                 data_buffer = b""
+                                synchronized = False
                                 continue
                             
-                            # Log buffer size periodically or on first packet (debug)
-                            # Uncomment for debugging: _LOGGER.debug("Buffering data: %d/%d bytes", len(data_buffer), packet_size)
+                            # Find frame boundary if not synchronized
+                            if not synchronized:
+                                header_pos = data_buffer.find(frame_header_signature)
+                                if header_pos != -1:
+                                    # Found frame header - discard everything before it
+                                    data_buffer = data_buffer[header_pos:]
+                                    synchronized = True
+                                    _LOGGER.info("Frame synchronization established at position %d", header_pos)
+                                elif len(data_buffer) > packet_size:
+                                    # Keep only recent data to search
+                                    data_buffer = data_buffer[-packet_size:]
+                                continue
                             
                             while len(data_buffer) >= packet_size:
-                                # _LOGGER.debug("Processing frame, buffer size: %d", len(data_buffer))
                                 # Extract one full frame (header + thermal data)
                                 frame_packet = data_buffer[:packet_size]
+                                
+                                # Validate frame header signature
+                                if not frame_packet.startswith(frame_header_signature):
+                                    _LOGGER.warning("Frame header validation failed. Re-synchronizing...")
+                                    synchronized = False
+                                    # Search for next valid header
+                                    header_pos = data_buffer.find(frame_header_signature, 1)
+                                    if header_pos != -1:
+                                        data_buffer = data_buffer[header_pos:]
+                                        synchronized = True
+                                        _LOGGER.info("Re-synchronized at position %d", header_pos)
+                                    else:
+                                        data_buffer = b""
+                                    break
+                                
+                                # Header is valid, consume the frame
                                 data_buffer = data_buffer[packet_size:]
                                 
                                 try:

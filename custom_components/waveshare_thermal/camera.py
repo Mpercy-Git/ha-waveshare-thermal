@@ -180,13 +180,27 @@ class WaveshareThermalCamera(Camera):
                     except Exception as e:
                         _LOGGER.debug("Could not set socket options: %s", e)
                     
-                    # Try sending a simple acknowledgment to trigger sensor startup
-                    # Some devices need any data exchange to initialize
+                    # Send command to start thermal streaming
+                    # Command protocol: #000CWREGB10302DE
+                    #   #000C - Command header
+                    #   WREG - Write Register command
+                    #   B1 - Register 0xB1 (streaming control)
+                    #   03 - Value 0x03 (enable streaming)
+                    #   02DE - Parameters/checksum
                     try:
-                        s.send(b"\x00")
-                        _LOGGER.debug("Sent connection acknowledgment")
+                        start_cmd = b"#000CWREGB10302DE"
+                        s.send(start_cmd)
+                        _LOGGER.info("Sent start streaming command to camera")
+                        
+                        # Wait for acknowledgment response (17 bytes: "   #0008WREG01FD\x00")
+                        s.settimeout(5.0)
+                        ack = s.recv(17)
+                        if ack:
+                            _LOGGER.info("Received camera acknowledgment: %s", ack.decode('ascii', errors='replace').strip())
+                        else:
+                            _LOGGER.warning("No acknowledgment received from camera")
                     except Exception as e:
-                        _LOGGER.debug("Could not send acknowledgment: %s", e)
+                        _LOGGER.warning("Error during handshake: %s (continuing anyway)", e)
                     
                     # Packet is raw thermal data: 10240 bytes (newer firmware)
                     packet_size = PAYLOAD_SIZE

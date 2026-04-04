@@ -8,7 +8,7 @@ import threading
 import time
 from threading import Lock
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 from homeassistant.components.camera import Camera
 from homeassistant.config_entries import ConfigEntry
@@ -35,6 +35,7 @@ FRAME_HEADER_SIZE = 160
 PAYLOAD_SIZE = BUFFER_WIDTH * BUFFER_HEIGHT * 2  # 9920 bytes
 FRAME_TAIL_SIZE = 176
 FRAME_SIZE = FRAME_HEADER_SIZE + PAYLOAD_SIZE + FRAME_TAIL_SIZE  # 10256 bytes total
+FRAME_SYNC_PATTERN = b"   #2808GFRA" + (b"\x00" * 20)
 
 # Inferno-ish colormap (interpolated)
 COLORMAP = [
@@ -45,17 +46,15 @@ def get_color(val, min_val, max_val):
     if max_val == min_val:
         norm = 0.5
     else:
-        norm = (val - min_val) / (max_val - min_val)
+        norm = max(0, min(1, (val - min_val) / (max_val - min_val)))
     
     # Map norm (0.0-1.0) to colormap
     idx = norm * (len(COLORMAP) - 1)
-    i = int(idx)
+    i = min(int(idx), len(COLORMAP) - 2)
     f = idx - i
-    if i >= len(COLORMAP) - 1:
-        return COLORMAP[-1]
-    
+
     c1 = COLORMAP[i]
-    c2 = COLORMAP[i+1]
+    c2 = COLORMAP[i + 1]
     
     r = int(c1[0] + f * (c2[0] - c1[0]))
     g = int(c1[1] + f * (c2[1] - c1[1]))
@@ -139,7 +138,7 @@ class WaveshareThermalCamera(Camera):
     def _create_placeholder_image(self):
         """Create a placeholder image."""
         try:
-            img = Image.new('RGB', (320, 248), color=(40, 44, 52))
+            img = Image.new('RGB', (320, 244), color=(40, 44, 52))
             draw = ImageDraw.Draw(img)
             # Simple fallback if font loading fails, though default is usually fine
             draw.text((80, 110), "Connecting...", fill=(255, 255, 255))
@@ -207,10 +206,8 @@ class WaveshareThermalCamera(Camera):
                     except Exception as e:
                         _LOGGER.warning("Error during handshake: %s (continuing anyway)", e)
                     
-                    # Frame format: 16-byte header + 10240-byte thermal data = 10256 bytes
-                    # Frame header signature: b"   #2808GFRA" (first 12 bytes)
+                    # Frame format: 160-byte header + 9920-byte thermal data + 176-byte tail = 10256 bytes
                     packet_size = FRAME_SIZE
-                    frame_header_signature = b"   #2808GFRA"
                     frame_count = 0
                     first_data_received = False
                     synchronized = False
@@ -243,7 +240,7 @@ class WaveshareThermalCamera(Camera):
                             
                             # Find frame boundary if not synchronized
                             if not synchronized:
-                                header_pos = data_buffer.find(frame_header_signature)
+                                header_pos = data_buffer.find(FRAME_SYNC_PATTERN)
                                 if header_pos != -1:
                                     # Found frame header - discard everything before it
                                     data_buffer = data_buffer[header_pos:]
@@ -258,12 +255,12 @@ class WaveshareThermalCamera(Camera):
                                 # Extract one full frame (header + thermal data)
                                 frame_packet = data_buffer[:packet_size]
                                 
-                                # Validate frame header signature
-                                if not frame_packet.startswith(frame_header_signature):
+                                # Validate frame header signature with marker + zero padding prefix
+                                if not frame_packet.startswith(FRAME_SYNC_PATTERN):
                                     _LOGGER.warning("Frame header validation failed. Re-synchronizing...")
                                     synchronized = False
                                     # Search for next valid header
-                                    header_pos = data_buffer.find(frame_header_signature, 1)
+                                    header_pos = data_buffer.find(FRAME_SYNC_PATTERN, 1)
                                     if header_pos != -1:
                                         data_buffer = data_buffer[header_pos:]
                                         synchronized = True
@@ -276,7 +273,7 @@ class WaveshareThermalCamera(Camera):
                                 data_buffer = data_buffer[packet_size:]
                                 
                                 try:
-                                    # Skip 160-byte frame header, extract thermal data, skip 16-byte tail
+                                    # Skip 160-byte frame header and extract only thermal payload
                                     raw_data = frame_packet[FRAME_HEADER_SIZE:FRAME_HEADER_SIZE + PAYLOAD_SIZE]
                                     
                                     # Validate data size

@@ -24,16 +24,16 @@ _LOGGER = logging.getLogger(__name__)
 FRAME_WIDTH = 80
 FRAME_HEIGHT = 62
 BUFFER_WIDTH = 80
-BUFFER_HEIGHT = 63  # Firmware sends 80*63 (10080 bytes) with header and tail
+BUFFER_HEIGHT = 62  # Correct thermal resolution (not 63)
 
-# Frame structure (discovered via packet capture and analysis):
+# Frame structure (final analysis):
 # - 160-byte header: "   #2808GFRA" + 148 zeros
-# - 10080 bytes thermal data: 80 * 63 * 2 bytes (little-endian uint16)
-# - 16-byte tail: checksum or padding
+# - 9920 bytes thermal data: 80 * 62 * 2 bytes (little-endian uint16)
+# - 176-byte tail: padding/checksum
 # Total frame size: 10256 bytes
 FRAME_HEADER_SIZE = 160
-PAYLOAD_SIZE = BUFFER_WIDTH * BUFFER_HEIGHT * 2  # 10080 bytes
-FRAME_TAIL_SIZE = 16
+PAYLOAD_SIZE = BUFFER_WIDTH * BUFFER_HEIGHT * 2  # 9920 bytes
+FRAME_TAIL_SIZE = 176
 FRAME_SIZE = FRAME_HEADER_SIZE + PAYLOAD_SIZE + FRAME_TAIL_SIZE  # 10256 bytes total
 
 # Inferno-ish colormap (interpolated)
@@ -285,7 +285,7 @@ class WaveshareThermalCamera(Camera):
                                         continue
                                     
                                     # Convert to pixels
-                                    # Firmware sends 80x63 array (5040 uint16 values in little-endian)
+                                    # Firmware sends 80x62 array (4960 uint16 values in little-endian)
                                     fmt = f"<{len(raw_data)//2}H"  # Little-endian unsigned short
                                     all_values = struct.unpack(fmt, raw_data)
                                     
@@ -306,13 +306,10 @@ class WaveshareThermalCamera(Camera):
                                         min_val = 0
                                         max_val = 65535
                                     
-                                    # Create Image from thermal data (80x63)
-                                    img = Image.new('RGB', (BUFFER_WIDTH, BUFFER_HEIGHT))  # 80x63
+                                    # Create Image from thermal data (80x62 - native resolution)
+                                    img = Image.new('RGB', (BUFFER_WIDTH, BUFFER_HEIGHT))  # 80x62
                                     pixels_rgb = [get_color(v, min_val, max_val) for v in values]
                                     img.putdata(pixels_rgb)
-                                    
-                                    # Crop to standard 80x62 display size (remove bottom row)
-                                    img = img.crop((0, 0, BUFFER_WIDTH, FRAME_HEIGHT))
                                     
                                     # Resize for better visibility in HA (4x upscaling)
                                     img = img.resize((320, 248), resample=Image.NEAREST)

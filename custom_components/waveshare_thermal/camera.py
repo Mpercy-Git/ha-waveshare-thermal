@@ -263,15 +263,17 @@ class WaveshareThermalCamera(Camera):
                                     # Skip first row (80 pixels) and get clean thermal data
                                     values = all_values[80:]  # Start from row 2 (pixel 80 onwards)
                                     
-                                    # Filter out zero values for temperature calculation
-                                    # (zeros are sensor errors, not real temperatures)
-                                    valid_values = [v for v in values if v > 0]
+                                    # Filter out invalid values for temperature calculation:
+                                    # - Zeros are sensor errors
+                                    # - Values >= 10000 are outlier/hot pixels (< 0.1% of data)
+                                    # Normal thermal range is roughly 2500-4000 raw (0-60°C)
+                                    valid_values = [v for v in values if 0 < v < 10000]
                                     
                                     if valid_values:
                                         min_val = min(valid_values)
                                         max_val = max(valid_values)
                                     else:
-                                        # Fallback if all values are zero (shouldn't happen)
+                                        # Fallback if all values are invalid (shouldn't happen)
                                         min_val = 0
                                         max_val = 65535
                                     

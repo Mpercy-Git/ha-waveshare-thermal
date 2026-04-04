@@ -36,7 +36,7 @@ PAYLOAD_SIZE = BUFFER_WIDTH * BUFFER_HEIGHT * 2  # 9920 bytes
 FRAME_TAIL_SIZE = 176
 FRAME_SIZE = FRAME_HEADER_SIZE + PAYLOAD_SIZE + FRAME_TAIL_SIZE  # 10256 bytes total
 FRAME_SYNC_PATTERN = b"   #2808GFRA" + (b"\x00" * 20)
-ROW_SHIFT = 6  # Corrects fixed horizontal wrap where right-edge pixels appear on the left
+ROW_SHIFT = 19  # Measured from live diagnostics: dominant wrap offset is 19 columns
 
 # Inferno-ish colormap (interpolated)
 COLORMAP = [

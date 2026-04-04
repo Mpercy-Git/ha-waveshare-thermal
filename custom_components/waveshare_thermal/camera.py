@@ -27,8 +27,11 @@ BUFFER_WIDTH = 80
 BUFFER_HEIGHT = 64  # Firmware sends 80*64 (10240 bytes), not 80*62
 ACTUAL_HEIGHT = 62  # But only display first 62 rows
 
-# Payload is just raw thermal data: 80 * 64 * 2 bytes = 10240 bytes (no headers/footers)
-PAYLOAD_SIZE = BUFFER_WIDTH * BUFFER_HEIGHT * 2  # 10240 bytes
+# Frame format from ESP32: HEADER (160) + THERMAL_DATA (10240) + FOOTER (160) = 10560 bytes
+STRIP_HEAD = 160  # Header bytes to skip
+STRIP_TAIL = 160  # Footer bytes to skip
+RAW_THERMAL_SIZE = BUFFER_WIDTH * BUFFER_HEIGHT * 2  # 10240 bytes
+TCP_FRAME_SIZE = STRIP_HEAD + RAW_THERMAL_SIZE + STRIP_TAIL  # 10560 bytes total
 
 # Inferno-ish colormap (interpolated)
 COLORMAP = [
@@ -148,7 +151,7 @@ class WaveshareThermalCamera(Camera):
         """Background thread to read from TCP stream."""
         reconnect_delay = 5
         max_reconnect_delay = 60
-        max_buffer_size = PAYLOAD_SIZE * 10  # Allow buffering of up to 10 frames
+        max_buffer_size = TCP_FRAME_SIZE * 10  # Allow buffering of up to 10 frames
         
         while self._running:
             try:
@@ -187,9 +190,8 @@ class WaveshareThermalCamera(Camera):
                     except Exception as e:
                         _LOGGER.debug("Could not send acknowledgment: %s", e)
                     
-                    # Packet is JUST raw thermal data: 10240 bytes
-                    # No headers or footers
-                    packet_size = PAYLOAD_SIZE
+                    # Packet is HEADER (160) + THERMAL_DATA (10240) + FOOTER (160) = 10560 bytes total
+                    packet_size = TCP_FRAME_SIZE
                     frame_count = 0
                     first_data_received = False
                     
@@ -223,17 +225,17 @@ class WaveshareThermalCamera(Camera):
                             
                             while len(data_buffer) >= packet_size:
                                 # _LOGGER.debug("Processing frame, buffer size: %d", len(data_buffer))
-                                # Extract one full frame (just raw data, no header/footer)
+                                # Extract one full frame with header (160) + data (10240) + footer (160)
                                 frame_packet = data_buffer[:packet_size]
                                 data_buffer = data_buffer[packet_size:]
                                 
                                 try:
-                                    # Parse raw thermal data (no headers to skip)
-                                    raw_data = frame_packet
+                                    # Strip header and footer to get raw thermal data
+                                    raw_data = frame_packet[STRIP_HEAD:STRIP_HEAD + RAW_THERMAL_SIZE]
                                     
                                     # Validate data size
-                                    if len(raw_data) != PAYLOAD_SIZE:
-                                        _LOGGER.warning("Invalid payload size: %d, expected %d", len(raw_data), PAYLOAD_SIZE)
+                                    if len(raw_data) != RAW_THERMAL_SIZE:
+                                        _LOGGER.warning("Invalid payload size: %d, expected %d", len(raw_data), RAW_THERMAL_SIZE)
                                         continue
                                     
                                     # Convert to pixels

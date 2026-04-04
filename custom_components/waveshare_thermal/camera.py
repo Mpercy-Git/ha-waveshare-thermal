@@ -255,26 +255,10 @@ class WaveshareThermalCamera(Camera):
                                         continue
                                     
                                     # Convert to pixels
-                                    pixels = []
-                                    fmt = f"<{len(raw_data)//2}H" # Little-endian unsigned short
+                                    # Firmware sends 80x64 array (5120 uint16 values)
+                                    # We display only first 62 rows (80x62 = 4960 pixels)
+                                    fmt = f"<{len(raw_data)//2}H"  # Little-endian unsigned short
                                     values = struct.unpack(fmt, raw_data)
-                                    
-                                    # Values are 16-bit. 
-                                    # The C code writes 80 * 64 words.
-                                    # We only care about the first 62 lines for the image if the sensor is 80x62.
-                                    # Or maybe the last 2 lines are garbage/metadata? 
-                                    # Client.js uses 80*62*2 as RAW_FRAME_SIZE but reads from a stream that sends more?
-                                    # Client.js: 
-                                    #   RECEIVE BUFFER logic:
-                                    #   const TCP_FRAME_SIZE = RAW_FRAME_SIZE + STRIP_HEAD + STRIP_TAIL; // 10560
-                                    #   Wait, RAW_FRAME_SIZE in client.js is 10240??
-                                    #     const RAW_FRAME_SIZE = FRAME_WIDTH * FRAME_HEIGHT * 2; // 10240
-                                    #     80 * 62 * 2 = 9920. 
-                                    #     10240 / 2 / 80 = 64.
-                                    #   So client.js defines HEIGHT=62 but calculates size as if HEIGHT=64?
-                                    #   No, client.js line 10: "const RAW_FRAME_SIZE = FRAME_WIDTH * FRAME_HEIGHT * 2; // 10240 bytes"
-                                    #   This comment is contradictory if W=80, H=62. 80*62*2 = 9920.
-                                    #   Let's assume the STREAM sends 64 lines, and we can just visualize all of them or crop.
                                     
                                     min_val = min(values)
                                     max_val = max(values)

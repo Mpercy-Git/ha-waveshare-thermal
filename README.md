@@ -65,7 +65,8 @@ If the camera image shows a "Connecting..." placeholder or reconnects every 30 s
     - If connecting via the camera's AP, ensure HA is connected to that specific Wi-Fi network.
     
 2.  **Check Firmware**: Ensure the ESP32 is running the thermal camera firmware that implements TCP streaming.
-    - The firmware must listen on port 3333 and respond to startup command `"   #2808GFRA"`.
+    - The firmware must listen on port 3333 and respond to startup command `#000CWREGB10302DE`.
+    - Firmware version tested: SenXorTCP Ver. 2.24
     
 3.  **Check Mode**: The camera works best in Station Mode (connected to your Router). If using AP mode, it may have limited range or single-connection limits.
 
@@ -81,8 +82,9 @@ If the camera image shows a "Connecting..." placeholder or reconnects every 30 s
 - Try power cycling the device.
 
 ### Corrupt Images or Pixel Drift
-- This integration is tuned for the standard 80x62 resolution (10240 bytes per frame).
-- If you see scrolling or garbled pixels, the firmware might be sending a different packet size.
+- This integration is tuned for the standard 80x62 resolution.
+- Each frame consists of a 16-byte header followed by 10240 bytes of thermal data (total: 10256 bytes).
+- If you see scrolling or garbled pixels, the firmware might be sending a different format.
 - Check the [Waveshare documentation](https://www.waveshare.com/wiki/Thermal_Camera_ESP32_Module) for firmware updates.
 
 ### Only One Connection Supported
@@ -101,10 +103,27 @@ Temperature (°C) = (Raw Value × 0.0984) - 265.82
 This formula is derived from the sensor's specification and matches the official Waveshare client implementation.
 
 ### Frame Format
-- **Resolution**: 80×62 pixels (standard)
-- **Data Format**: Raw 16-bit unsigned integers (little-endian)
-- **Packet Structure**: 160-byte header + 10240 bytes payload + 160-byte footer
-- **Update Rate**: Depends on firmware (typically 15-30 FPS)
+The integration communicates with the camera using a proprietary TCP protocol:
+
+**Connection Handshake:**
+1. Client connects to camera on port 3333
+2. Client sends: `#000CWREGB10302DE` (17 bytes)
+   - `#000C` - Command header
+   - `WREG` - Write Register command
+   - `B1` - Register 0xB1 (streaming control)
+   - `03` - Value 0x03 (enable streaming)
+   - `02DE` - Parameters/checksum
+3. Camera responds: `   #0008WREG01FD\x00` (17 bytes, acknowledgment)
+4. Camera begins streaming thermal frames
+
+**Frame Structure:**
+- **Header**: 16 bytes (e.g., `   #2808GFRA` + null padding)
+  - `2808` in hex = 10248 decimal (frame size: 16 + 10240 = 10256, but reported as 0x2808)
+- **Thermal Data**: 10240 bytes (80×64 pixels × 2 bytes per pixel, little-endian uint16)
+- **Total**: 10256 bytes per frame
+
+**Resolution**: 80×62 pixels (only first 62 rows are displayed, bottom 2 rows ignored)
+**Update Rate**: Typically 5-10 FPS depending on network conditions
 
 ## Known Limitations
 - Only one active TCP connection supported per device (firmware limitation).

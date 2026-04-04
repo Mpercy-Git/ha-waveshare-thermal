@@ -289,8 +289,9 @@ class WaveshareThermalCamera(Camera):
                                     fmt = f"<{len(raw_data)//2}H"  # Little-endian unsigned short
                                     all_values = struct.unpack(fmt, raw_data)
                                     
-                                    # Use all values - firmware is already correct size
-                                    values = all_values
+                                    # Skip first row (row 0): device firmware has corrupted first row
+                                    # Use rows 1-61 (4880 pixels = 80x61 valid rows)
+                                    values = all_values[80:]  # Skip first 80 pixels (row 0)
                                     
                                     # Filter out invalid values for temperature calculation:
                                     # - Zeros are sensor errors/missing pixels
@@ -306,13 +307,14 @@ class WaveshareThermalCamera(Camera):
                                         min_val = 0
                                         max_val = 65535
                                     
-                                    # Create Image from thermal data (80x62 - native resolution)
-                                    img = Image.new('RGB', (BUFFER_WIDTH, BUFFER_HEIGHT))  # 80x62
+                                    # Create Image from thermal data (80x61 - row 0 skipped)
+                                    img = Image.new('RGB', (BUFFER_WIDTH, 61))  # 80x61 (rows 1-61)
                                     pixels_rgb = [get_color(v, min_val, max_val) for v in values]
                                     img.putdata(pixels_rgb)
                                     
-                                    # Resize for better visibility in HA (4x upscaling)
-                                    img = img.resize((320, 248), resample=Image.NEAREST)
+                                    # Resize for better visibility in HA (maintain aspect ratio)
+                                    # 80x61 -> scale to width 320, height maintains ratio
+                                    img = img.resize((320, 244), resample=Image.NEAREST)
                                     
                                     # Draw stats
                                     draw = ImageDraw.Draw(img)

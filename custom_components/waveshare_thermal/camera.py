@@ -36,6 +36,7 @@ PAYLOAD_SIZE = BUFFER_WIDTH * BUFFER_HEIGHT * 2  # 9920 bytes
 FRAME_TAIL_SIZE = 176
 FRAME_SIZE = FRAME_HEADER_SIZE + PAYLOAD_SIZE + FRAME_TAIL_SIZE  # 10256 bytes total
 FRAME_SYNC_PATTERN = b"   #2808GFRA" + (b"\x00" * 20)
+ROW_SHIFT = 6  # Corrects fixed horizontal wrap where right-edge pixels appear on the left
 
 # Inferno-ish colormap (interpolated)
 COLORMAP = [
@@ -286,9 +287,19 @@ class WaveshareThermalCamera(Camera):
                                     fmt = f"<{len(raw_data)//2}H"  # Little-endian unsigned short
                                     all_values = struct.unpack(fmt, raw_data)
                                     
-                                    # Skip first row (row 0): device firmware has corrupted first row
-                                    # Use rows 1-61 (4880 pixels = 80x61 valid rows)
-                                    values = all_values[80:]  # Skip first 80 pixels (row 0)
+                                    # Skip first row (row 0): device firmware has corrupted first row.
+                                    # Then apply per-row de-rotation to undo fixed horizontal wrap.
+                                    values_61 = all_values[80:]  # 61 rows * 80 cols
+                                    if ROW_SHIFT:
+                                        corrected_rows = []
+                                        for row_idx in range(61):
+                                            row_start = row_idx * BUFFER_WIDTH
+                                            row = list(values_61[row_start:row_start + BUFFER_WIDTH])
+                                            corrected = row[ROW_SHIFT:] + row[:ROW_SHIFT]
+                                            corrected_rows.extend(corrected)
+                                        values = corrected_rows
+                                    else:
+                                        values = values_61
                                     
                                     # Filter out invalid values for temperature calculation:
                                     # - Zeros are sensor errors/missing pixels

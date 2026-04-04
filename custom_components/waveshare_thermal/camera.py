@@ -24,16 +24,17 @@ _LOGGER = logging.getLogger(__name__)
 FRAME_WIDTH = 80
 FRAME_HEIGHT = 62
 BUFFER_WIDTH = 80
-BUFFER_HEIGHT = 64  # Firmware sends 80*64 (10240 bytes), not 80*62
-ACTUAL_HEIGHT = 62  # But only display first 62 rows
+BUFFER_HEIGHT = 63  # Firmware sends 80*63 (10080 bytes) with header and tail
 
-# Frame structure (discovered via packet capture):
-# - 16-byte header: "   #2808GFRA" + padding (0x2808 = frame size in hex)
-# - 10240 bytes thermal data: 80 * 64 * 2 bytes
+# Frame structure (discovered via packet capture and analysis):
+# - 160-byte header: "   #2808GFRA" + 148 zeros
+# - 10080 bytes thermal data: 80 * 63 * 2 bytes (little-endian uint16)
+# - 16-byte tail: checksum or padding
 # Total frame size: 10256 bytes
-FRAME_HEADER_SIZE = 16
-PAYLOAD_SIZE = BUFFER_WIDTH * BUFFER_HEIGHT * 2  # 10240 bytes
-FRAME_SIZE = FRAME_HEADER_SIZE + PAYLOAD_SIZE  # 10256 bytes total
+FRAME_HEADER_SIZE = 160
+PAYLOAD_SIZE = BUFFER_WIDTH * BUFFER_HEIGHT * 2  # 10080 bytes
+FRAME_TAIL_SIZE = 16
+FRAME_SIZE = FRAME_HEADER_SIZE + PAYLOAD_SIZE + FRAME_TAIL_SIZE  # 10256 bytes total
 
 # Inferno-ish colormap (interpolated)
 COLORMAP = [
@@ -275,8 +276,8 @@ class WaveshareThermalCamera(Camera):
                                 data_buffer = data_buffer[packet_size:]
                                 
                                 try:
-                                    # Skip 16-byte frame header, extract thermal data
-                                    raw_data = frame_packet[FRAME_HEADER_SIZE:]
+                                    # Skip 160-byte frame header, extract thermal data, skip 16-byte tail
+                                    raw_data = frame_packet[FRAME_HEADER_SIZE:FRAME_HEADER_SIZE + PAYLOAD_SIZE]
                                     
                                     # Validate data size
                                     if len(raw_data) != PAYLOAD_SIZE:
@@ -284,16 +285,15 @@ class WaveshareThermalCamera(Camera):
                                         continue
                                     
                                     # Convert to pixels
-                                    # Firmware sends 80x64 array (5120 uint16 values)
-                                    # First row (80 pixels) often contains garbage - skip it
+                                    # Firmware sends 80x63 array (5040 uint16 values in little-endian)
                                     fmt = f"<{len(raw_data)//2}H"  # Little-endian unsigned short
                                     all_values = struct.unpack(fmt, raw_data)
                                     
-                                    # Skip first row (80 pixels) and get clean thermal data
-                                    values = all_values[80:]  # Start from row 2 (pixel 80 onwards)
+                                    # Use all values - firmware is already correct size
+                                    values = all_values
                                     
                                     # Filter out invalid values for temperature calculation:
-                                    # - Zeros are sensor errors
+                                    # - Zeros are sensor errors/missing pixels
                                     # - Values >= 10000 are outlier/hot pixels (< 0.1% of data)
                                     # Normal thermal range is roughly 2500-4000 raw (0-60°C)
                                     valid_values = [v for v in values if 0 < v < 10000]
@@ -306,16 +306,15 @@ class WaveshareThermalCamera(Camera):
                                         min_val = 0
                                         max_val = 65535
                                     
-                                    # Create Image from clean data (skip first row)
-                                    # This gives us 63 rows, then we'll crop to 62
-                                    img = Image.new('RGB', (BUFFER_WIDTH, BUFFER_HEIGHT - 1))  # 80x63
+                                    # Create Image from thermal data (80x63)
+                                    img = Image.new('RGB', (BUFFER_WIDTH, BUFFER_HEIGHT))  # 80x63
                                     pixels_rgb = [get_color(v, min_val, max_val) for v in values]
                                     img.putdata(pixels_rgb)
                                     
-                                    # Crop to standard 80x62 display size
-                                    img = img.crop((0, 0, BUFFER_WIDTH, ACTUAL_HEIGHT))
+                                    # Crop to standard 80x62 display size (remove bottom row)
+                                    img = img.crop((0, 0, BUFFER_WIDTH, FRAME_HEIGHT))
                                     
-                                    # Resize for better visibility in HA (Optional, but 80px is tiny)
+                                    # Resize for better visibility in HA (4x upscaling)
                                     img = img.resize((320, 248), resample=Image.NEAREST)
                                     
                                     # Draw stats

@@ -40,5 +40,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: config_entries.ConfigEnt
 
 async def async_unload_entry(hass: HomeAssistant, entry: config_entries.ConfigEntry) -> bool:
     """Unload a config entry."""
+    # Clean up stored entity references
+    if DOMAIN in hass.data and "entities" in hass.data[DOMAIN]:
+        hass.data[DOMAIN]["entities"].pop(entry.entry_id, None)
+    
     return await hass.config_entries.async_unload_platforms(entry, [Platform.CAMERA, Platform.SENSOR])
 

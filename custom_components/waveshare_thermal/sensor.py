@@ -45,7 +45,7 @@ class ThermalCameraMinTempSensor(SensorEntity):
         self.hass = hass
         self._name = name
         self._attr_unique_id = f"{unique_id}_min_temp"
-        self._camera_entity = camera_entity
+        self._entry_id = unique_id
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
         self._attr_state_class = SensorStateClass.MEASUREMENT
 
@@ -55,10 +55,18 @@ class ThermalCameraMinTempSensor(SensorEntity):
         return f"{self._name} Min Temperature"
 
     @property
+    def _camera_entity(self):
+        """Get camera entity dynamically from hass.data."""
+        if DOMAIN in self.hass.data and "entities" in self.hass.data[DOMAIN]:
+            return self.hass.data[DOMAIN]["entities"].get(self._entry_id)
+        return None
+
+    @property
     def native_value(self):
         """Return the current minimum temperature."""
-        if self._camera_entity and hasattr(self._camera_entity, "get_min_temp"):
-            return self._camera_entity.get_min_temp()
+        camera = self._camera_entity
+        if camera and hasattr(camera, "get_min_temp"):
+            return camera.get_min_temp()
         return None
 
     @property
@@ -75,7 +83,7 @@ class ThermalCameraMaxTempSensor(SensorEntity):
         self.hass = hass
         self._name = name
         self._attr_unique_id = f"{unique_id}_max_temp"
-        self._camera_entity = camera_entity
+        self._entry_id = unique_id
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
         self._attr_state_class = SensorStateClass.MEASUREMENT
 
@@ -85,10 +93,18 @@ class ThermalCameraMaxTempSensor(SensorEntity):
         return f"{self._name} Max Temperature"
 
     @property
+    def _camera_entity(self):
+        """Get camera entity dynamically from hass.data."""
+        if DOMAIN in self.hass.data and "entities" in self.hass.data[DOMAIN]:
+            return self.hass.data[DOMAIN]["entities"].get(self._entry_id)
+        return None
+
+    @property
     def native_value(self):
         """Return the current maximum temperature."""
-        if self._camera_entity and hasattr(self._camera_entity, "get_max_temp"):
-            return self._camera_entity.get_max_temp()
+        camera = self._camera_entity
+        if camera and hasattr(camera, "get_max_temp"):
+            return camera.get_max_temp()
         return None
 
     @property

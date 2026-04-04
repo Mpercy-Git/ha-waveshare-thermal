@@ -29,9 +29,6 @@ ACTUAL_HEIGHT = 62  # But only display first 62 rows
 
 # Payload is just raw thermal data: 80 * 64 * 2 bytes = 10240 bytes (no headers/footers)
 PAYLOAD_SIZE = BUFFER_WIDTH * BUFFER_HEIGHT * 2  # 10240 bytes
-# Inferno-ish colormap (interpolated)
-HEADER_SIZE = 160  # STRIP_HEAD in client.js is 160?? client.js says 160.
-FOOTER_SIZE = 160  # STRIP_TAIL in client.js.
 
 # Inferno-ish colormap (interpolated)
 COLORMAP = [
@@ -129,6 +126,10 @@ class WaveshareThermalCamera(Camera):
         with self._image_lock:
             return self._last_image
 
+    async def async_will_remove_from_hass(self):
+        """Stop the background thread when entity is removed."""
+        self.stop()
+
     def _create_placeholder_image(self):
         """Create a placeholder image."""
         try:
@@ -178,6 +179,14 @@ class WaveshareThermalCamera(Camera):
                     except Exception as e:
                         _LOGGER.debug("Could not set socket options: %s", e)
                     
+                    # Try sending a simple acknowledgment to trigger sensor startup
+                    # Some devices need any data exchange to initialize
+                    try:
+                        s.send(b"\x00")
+                        _LOGGER.debug("Sent connection acknowledgment")
+                    except Exception as e:
+                        _LOGGER.debug("Could not send acknowledgment: %s", e)
+                    
                     # Packet is JUST raw thermal data: 10240 bytes
                     # No headers or footers
                     packet_size = PAYLOAD_SIZE
@@ -210,8 +219,7 @@ class WaveshareThermalCamera(Camera):
                                 continue
                             
                             # Log buffer size periodically or on first packet (debug)
-                            if len(data_buffer) < packet_size and len(data_buffer) > 0:
-                                 pass # _LOGGER.debug("Buffering data: %d/%d bytes", len(data_buffer), packet_size)
+                            # Uncomment for debugging: _LOGGER.debug("Buffering data: %d/%d bytes", len(data_buffer), packet_size)
                             
                             while len(data_buffer) >= packet_size:
                                 # _LOGGER.debug("Processing frame, buffer size: %d", len(data_buffer))
@@ -299,7 +307,9 @@ class WaveshareThermalCamera(Camera):
                                     continue
                         
                         except socket.timeout:
-                            _LOGGER.warning("No data received for 60 seconds. Device may not be sending thermal stream. Reconnecting...")
+                            _LOGGER.warning("No data received for 60 seconds. Device may not be sending thermal stream.")
+                            _LOGGER.warning("Check: 1) Is device powered on? 2) USB connected (for sensor initialization)? 3) Thermal camera firmware running?")
+                            _LOGGER.warning("Try power-cycling the device or checking ESP32 serial logs for errors. Reconnecting...")
                             break
                         except Exception as e:
                             _LOGGER.error("Socket recv error: %s", e)

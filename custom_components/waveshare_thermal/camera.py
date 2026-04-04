@@ -27,9 +27,13 @@ BUFFER_WIDTH = 80
 BUFFER_HEIGHT = 64  # Firmware sends 80*64 (10240 bytes), not 80*62
 ACTUAL_HEIGHT = 62  # But only display first 62 rows
 
-# Payload is RAW thermal data: 80 * 64 * 2 bytes = 10240 bytes (newer firmware version)
-# Note: Older firmware versions sent frames with 160-byte header + 10240 data + 160-byte footer
+# Frame structure (discovered via packet capture):
+# - 16-byte header: "   #2808GFRA" + padding (0x2808 = frame size in hex)
+# - 10240 bytes thermal data: 80 * 64 * 2 bytes
+# Total frame size: 10256 bytes
+FRAME_HEADER_SIZE = 16
 PAYLOAD_SIZE = BUFFER_WIDTH * BUFFER_HEIGHT * 2  # 10240 bytes
+FRAME_SIZE = FRAME_HEADER_SIZE + PAYLOAD_SIZE  # 10256 bytes total
 
 # Inferno-ish colormap (interpolated)
 COLORMAP = [
@@ -149,7 +153,7 @@ class WaveshareThermalCamera(Camera):
         """Background thread to read from TCP stream."""
         reconnect_delay = 5
         max_reconnect_delay = 60
-        max_buffer_size = PAYLOAD_SIZE * 10  # Allow buffering of up to 10 frames
+        max_buffer_size = FRAME_SIZE * 10  # Allow buffering of up to 10 frames
         
         while self._running:
             try:
@@ -202,8 +206,8 @@ class WaveshareThermalCamera(Camera):
                     except Exception as e:
                         _LOGGER.warning("Error during handshake: %s (continuing anyway)", e)
                     
-                    # Packet is raw thermal data: 10240 bytes (newer firmware)
-                    packet_size = PAYLOAD_SIZE
+                    # Frame format: 16-byte header + 10240-byte thermal data = 10256 bytes
+                    packet_size = FRAME_SIZE
                     frame_count = 0
                     first_data_received = False
                     
@@ -237,13 +241,13 @@ class WaveshareThermalCamera(Camera):
                             
                             while len(data_buffer) >= packet_size:
                                 # _LOGGER.debug("Processing frame, buffer size: %d", len(data_buffer))
-                                # Extract one full frame of raw thermal data
+                                # Extract one full frame (header + thermal data)
                                 frame_packet = data_buffer[:packet_size]
                                 data_buffer = data_buffer[packet_size:]
                                 
                                 try:
-                                    # Raw thermal data (newer firmware sends without headers)
-                                    raw_data = frame_packet
+                                    # Skip 16-byte frame header, extract thermal data
+                                    raw_data = frame_packet[FRAME_HEADER_SIZE:]
                                     
                                     # Validate data size
                                     if len(raw_data) != PAYLOAD_SIZE:

@@ -36,7 +36,8 @@ PAYLOAD_SIZE = BUFFER_WIDTH * BUFFER_HEIGHT * 2  # 9920 bytes
 FRAME_TAIL_SIZE = 176
 FRAME_SIZE = FRAME_HEADER_SIZE + PAYLOAD_SIZE + FRAME_TAIL_SIZE  # 10256 bytes total
 FRAME_SYNC_PATTERN = b"   #2808GFRA" + (b"\x00" * 20)
-ROW_SHIFT = 19  # Measured from live diagnostics: dominant wrap offset is 19 columns
+DEFAULT_ROW_SHIFT = 19
+AUTO_SHIFT_LEARN_FRAMES = 8
 
 # Inferno-ish colormap (interpolated)
 COLORMAP = [
@@ -61,6 +62,47 @@ def get_color(val, min_val, max_val):
     g = int(c1[1] + f * (c2[1] - c1[1]))
     b = int(c1[2] + f * (c2[2] - c1[2]))
     return (r, g, b)
+
+
+def circular_shift_row(row, shift):
+    """Circularly shift a row to the right by shift columns."""
+    if shift == 0:
+        return row
+    shift = shift % BUFFER_WIDTH
+    return row[-shift:] + row[:-shift]
+
+
+def score_shift(rows, shift):
+    """Lower score means smoother image continuity for this shift."""
+    shifted = [circular_shift_row(row, shift) for row in rows]
+    total = 0
+    count = 0
+
+    for row in shifted:
+        # Penalize seam discontinuity at column wrap.
+        total += abs(row[-1] - row[0])
+        count += 1
+
+    for idx in range(len(shifted) - 1):
+        r1 = shifted[idx]
+        r2 = shifted[idx + 1]
+        for x in range(BUFFER_WIDTH):
+            total += abs(r1[x] - r2[x])
+            count += 1
+
+    return total / max(count, 1)
+
+
+def estimate_best_shift(rows):
+    """Estimate best row shift for the current frame."""
+    best_shift = 0
+    best_score = None
+    for shift in range(BUFFER_WIDTH):
+        current = score_shift(rows, shift)
+        if best_score is None or current < best_score:
+            best_score = current
+            best_shift = shift
+    return best_shift
 
 async def async_setup_platform(
     hass: HomeAssistant,
@@ -107,6 +149,8 @@ class WaveshareThermalCamera(Camera):
         self._min_temp = 0.0
         self._max_temp = 0.0
         self._temp_lock = Lock()  # Thread-safe temperature access
+        self._row_shift = None
+        self._shift_samples = []
         self._running = True
         self._thread = threading.Thread(target=self._run_worker, name=f"ThermalCamera_{name}")
         self._thread.daemon = True
@@ -288,18 +332,39 @@ class WaveshareThermalCamera(Camera):
                                     all_values = struct.unpack(fmt, raw_data)
                                     
                                     # Skip first row (row 0): device firmware has corrupted first row.
-                                    # Then apply per-row de-rotation to undo fixed horizontal wrap.
                                     values_61 = all_values[80:]  # 61 rows * 80 cols
-                                    if ROW_SHIFT:
-                                        corrected_rows = []
-                                        for row_idx in range(61):
-                                            row_start = row_idx * BUFFER_WIDTH
-                                            row = list(values_61[row_start:row_start + BUFFER_WIDTH])
-                                            corrected = row[ROW_SHIFT:] + row[:ROW_SHIFT]
-                                            corrected_rows.extend(corrected)
-                                        values = corrected_rows
-                                    else:
-                                        values = values_61
+                                    rows = [
+                                        list(values_61[row_idx * BUFFER_WIDTH:(row_idx + 1) * BUFFER_WIDTH])
+                                        for row_idx in range(61)
+                                    ]
+
+                                    # Learn best shift for first few frames, then lock it.
+                                    frame_shift = estimate_best_shift(rows)
+                                    if self._row_shift is None:
+                                        self._shift_samples.append(frame_shift)
+                                        if len(self._shift_samples) >= AUTO_SHIFT_LEARN_FRAMES:
+                                            self._row_shift = max(
+                                                set(self._shift_samples),
+                                                key=self._shift_samples.count,
+                                            )
+                                            _LOGGER.info(
+                                                "Locked thermal row shift to %d after %d samples",
+                                                self._row_shift,
+                                                len(self._shift_samples),
+                                            )
+
+                                    applied_shift = self._row_shift
+                                    if applied_shift is None:
+                                        applied_shift = frame_shift
+
+                                    if applied_shift == 0 and DEFAULT_ROW_SHIFT:
+                                        # Fallback for flat scenes where auto-detect can be ambiguous.
+                                        applied_shift = DEFAULT_ROW_SHIFT
+
+                                    corrected_rows = []
+                                    for row in rows:
+                                        corrected_rows.extend(circular_shift_row(row, applied_shift))
+                                    values = corrected_rows
                                     
                                     # Filter out invalid values for temperature calculation:
                                     # - Zeros are sensor errors/missing pixels

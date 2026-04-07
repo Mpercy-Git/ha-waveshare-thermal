@@ -17,5 +17,17 @@
         "abort": {
             "already_configured": "Device is already configured"
         }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Update Thermal Camera Connection",
+                "data": {
+                    "host": "Host",
+                    "port": "Port",
+                    "name": "Name"
+                }
+            }
+        }
     }
 }

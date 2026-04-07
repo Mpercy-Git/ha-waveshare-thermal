@@ -59,3 +59,44 @@ class WaveshareThermalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
         )
+
+    @staticmethod
+    def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> config_entries.OptionsFlow:
+        """Return the options flow handler."""
+        return WaveshareThermalOptionsFlow(config_entry)
+
+
+class WaveshareThermalOptionsFlow(config_entries.OptionsFlow):
+    """Handle options for Waveshare Thermal Camera."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        """Initialize options flow."""
+        self._config_entry = config_entry
+
+    async def async_step_init(self, user_input: dict | None = None) -> FlowResult:
+        """Manage the integration options."""
+        errors = {}
+
+        if user_input is not None:
+            try:
+                await validate_input(self.hass, user_input)
+                return self.async_create_entry(title="", data=user_input)
+            except ConnectionError:
+                errors["base"] = "cannot_connect"
+            except Exception:  # pylint: disable=broad-except
+                _LOGGER.exception("Unexpected exception in options flow")
+                errors["base"] = "unknown"
+
+        current_host = self._config_entry.options.get(CONF_HOST, self._config_entry.data.get(CONF_HOST, ""))
+        current_port = self._config_entry.options.get(CONF_PORT, self._config_entry.data.get(CONF_PORT, DEFAULT_PORT))
+        current_name = self._config_entry.options.get(CONF_NAME, self._config_entry.data.get(CONF_NAME, DEFAULT_NAME))
+
+        options_schema = vol.Schema(
+            {
+                vol.Required(CONF_HOST, default=current_host): str,
+                vol.Optional(CONF_PORT, default=current_port): int,
+                vol.Optional(CONF_NAME, default=current_name): str,
+            }
+        )
+
+        return self.async_show_form(step_id="init", data_schema=options_schema, errors=errors)

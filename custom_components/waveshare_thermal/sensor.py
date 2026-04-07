@@ -18,7 +18,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the sensor platform from config entry."""
-    name = entry.data.get(CONF_NAME) or entry.title
+    name = entry.options.get(CONF_NAME, entry.data.get(CONF_NAME) or entry.title)
     unique_id = entry.entry_id
 
     # Get the camera entity to access temperature data

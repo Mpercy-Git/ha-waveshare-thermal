@@ -78,9 +78,9 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the camera platform from config entry."""
-    host = entry.data[CONF_HOST]
-    port = entry.data.get(CONF_PORT, DEFAULT_PORT)
-    name = entry.data.get(CONF_NAME) or entry.title
+    host = entry.options.get(CONF_HOST, entry.data[CONF_HOST])
+    port = entry.options.get(CONF_PORT, entry.data.get(CONF_PORT, DEFAULT_PORT))
+    name = entry.options.get(CONF_NAME, entry.data.get(CONF_NAME) or entry.title)
 
     camera = WaveshareThermalCamera(hass, name, host, port, entry.entry_id)
     

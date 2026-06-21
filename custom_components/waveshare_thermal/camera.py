@@ -1,5 +1,4 @@
 """Camera platform for Waveshare Thermal Camera."""
-import asyncio
 import io
 import logging
 import socket
@@ -15,14 +14,11 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 from .const import DEFAULT_PORT, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-FRAME_WIDTH = 80
-FRAME_HEIGHT = 62
 BUFFER_WIDTH = 80
 BUFFER_HEIGHT = 62  # Correct thermal resolution (not 63)
 
@@ -104,16 +100,6 @@ def estimate_best_shift(rows):
             best_shift = shift
     return best_shift
 
-async def async_setup_platform(
-    hass: HomeAssistant,
-    config: ConfigType,
-    async_add_entities: AddEntitiesCallback,
-    discovery_info: DiscoveryInfoType | None = None,
-) -> None:
-    """Set up the camera platform from yaml."""
-    # We could deprecate this or leave it for now.
-    pass
-
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -140,14 +126,14 @@ class WaveshareThermalCamera(Camera):
         """Initialize the camera."""
         super().__init__()
         self.hass = hass
-        self._name = name
+        self._attr_name = name
         self._host = host
         self._port = port
         self._attr_unique_id = unique_id
         self._last_image = self._create_placeholder_image()
         self._image_lock = Lock()  # Thread-safe image access
-        self._min_temp = 0.0
-        self._max_temp = 0.0
+        self._min_temp = None
+        self._max_temp = None
         self._temp_lock = Lock()  # Thread-safe temperature access
         self._row_shift = None
         self._shift_samples = []
@@ -155,11 +141,6 @@ class WaveshareThermalCamera(Camera):
         self._thread = threading.Thread(target=self._run_worker, name=f"ThermalCamera_{name}")
         self._thread.daemon = True
         self._thread.start()
-
-    @property
-    def name(self):
-        """Return the name of this camera."""
-        return self._name
 
     def get_min_temp(self):
         """Get minimum temperature."""
@@ -339,8 +320,8 @@ class WaveshareThermalCamera(Camera):
                                     ]
 
                                     # Learn best shift for first few frames, then lock it.
-                                    frame_shift = estimate_best_shift(rows)
                                     if self._row_shift is None:
+                                        frame_shift = estimate_best_shift(rows)
                                         self._shift_samples.append(frame_shift)
                                         if len(self._shift_samples) >= AUTO_SHIFT_LEARN_FRAMES:
                                             self._row_shift = max(
@@ -352,10 +333,9 @@ class WaveshareThermalCamera(Camera):
                                                 self._row_shift,
                                                 len(self._shift_samples),
                                             )
-
-                                    applied_shift = self._row_shift
-                                    if applied_shift is None:
                                         applied_shift = frame_shift
+                                    else:
+                                        applied_shift = self._row_shift
 
                                     if applied_shift == 0 and DEFAULT_ROW_SHIFT:
                                         # Fallback for flat scenes where auto-detect can be ambiguous.

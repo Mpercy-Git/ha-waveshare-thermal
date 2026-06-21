@@ -20,6 +20,7 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
     }
 )
 
+
 async def validate_input(hass: HomeAssistant, data: dict) -> dict:
     """Validate the user input allows us to connect."""
     # Test connection
@@ -34,7 +35,7 @@ async def validate_input(hass: HomeAssistant, data: dict) -> dict:
     except Exception as e:
         _LOGGER.error("Connection failed: %s", e)
         raise ConnectionError
-    
+
     return {"title": data[CONF_NAME]}
 
 
@@ -49,12 +50,15 @@ class WaveshareThermalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             try:
                 info = await validate_input(self.hass, user_input)
-                return self.async_create_entry(title=info["title"], data=user_input)
             except ConnectionError:
                 errors["base"] = "cannot_connect"
             except Exception:  # pylint: disable=broad-except
                 _LOGGER.exception("Unexpected exception")
                 errors["base"] = "unknown"
+            else:
+                await self.async_set_unique_id(user_input[CONF_HOST])
+                self._abort_if_unique_id_configured()
+                return self.async_create_entry(title=info["title"], data=user_input)
 
         return self.async_show_form(
             step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
@@ -80,12 +84,13 @@ class WaveshareThermalOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             try:
                 await validate_input(self.hass, user_input)
-                return self.async_create_entry(title="", data=user_input)
             except ConnectionError:
                 errors["base"] = "cannot_connect"
             except Exception:  # pylint: disable=broad-except
                 _LOGGER.exception("Unexpected exception in options flow")
                 errors["base"] = "unknown"
+            else:
+                return self.async_create_entry(title="", data=user_input)
 
         current_host = self._config_entry.options.get(CONF_HOST, self._config_entry.data.get(CONF_HOST, ""))
         current_port = self._config_entry.options.get(CONF_PORT, self._config_entry.data.get(CONF_PORT, DEFAULT_PORT))

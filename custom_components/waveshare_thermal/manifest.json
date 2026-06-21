@@ -1,7 +1,7 @@
 {
   "domain": "waveshare_thermal",
   "name": "Waveshare Thermal Camera",
-  "codeowners": [],
+  "codeowners": ["@Mpercy-Git"],
   "config_flow": true,
   "dependencies": [],
   "documentation": "https://github.com/Mpercy-Git/ha-waveshare-thermal",

@@ -1,13 +1,13 @@
 """Sensor platform for Waveshare Thermal Camera."""
 import logging
 
-from homeassistant.components.sensor import SensorEntity, SensorStateClass
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT, UnitOfTemperature
+from homeassistant.const import CONF_NAME, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DEFAULT_PORT, DOMAIN
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,8 +31,8 @@ async def async_setup_entry(
 
     async_add_entities(
         [
-            ThermalCameraMinTempSensor(hass, name, unique_id, camera_entity),
-            ThermalCameraMaxTempSensor(hass, name, unique_id, camera_entity),
+            ThermalCameraMinTempSensor(name, unique_id),
+            ThermalCameraMaxTempSensor(name, unique_id),
         ]
     )
 
@@ -40,19 +40,15 @@ async def async_setup_entry(
 class ThermalCameraMinTempSensor(SensorEntity):
     """Representation of minimum temperature from thermal camera."""
 
-    def __init__(self, hass, name, unique_id, camera_entity):
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+
+    def __init__(self, name, unique_id):
         """Initialize the sensor."""
-        self.hass = hass
-        self._name = name
+        self._attr_name = f"{name} Min Temperature"
         self._attr_unique_id = f"{unique_id}_min_temp"
-        self._entry_id = unique_id
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
         self._attr_state_class = SensorStateClass.MEASUREMENT
-
-    @property
-    def name(self):
-        """Return the name of the sensor."""
-        return f"{self._name} Min Temperature"
+        self._entry_id = unique_id
 
     @property
     def _camera_entity(self):
@@ -78,19 +74,15 @@ class ThermalCameraMinTempSensor(SensorEntity):
 class ThermalCameraMaxTempSensor(SensorEntity):
     """Representation of maximum temperature from thermal camera."""
 
-    def __init__(self, hass, name, unique_id, camera_entity):
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+
+    def __init__(self, name, unique_id):
         """Initialize the sensor."""
-        self.hass = hass
-        self._name = name
+        self._attr_name = f"{name} Max Temperature"
         self._attr_unique_id = f"{unique_id}_max_temp"
-        self._entry_id = unique_id
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
         self._attr_state_class = SensorStateClass.MEASUREMENT
-
-    @property
-    def name(self):
-        """Return the name of the sensor."""
-        return f"{self._name} Max Temperature"
+        self._entry_id = unique_id
 
     @property
     def _camera_entity(self):

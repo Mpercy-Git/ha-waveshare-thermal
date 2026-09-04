@@ -1,5 +1,10 @@
 name: Release
 
+# Handles tags pushed by hand. Tags pushed by bump_version.yml do NOT reach
+# here: GitHub does not start workflow runs from events created with the
+# default GITHUB_TOKEN, which is why bump_version.yml creates its own release.
+# Keep the two paths in step if you change either.
+
 on:
   push:
     tags:
@@ -15,7 +20,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check the tag matches the manifest version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          MANIFEST_VERSION=$(jq -r '.version' custom_components/waveshare_thermal/manifest.json)
+
+          if [ "$TAG_VERSION" != "$MANIFEST_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME points at a commit whose manifest.json says $MANIFEST_VERSION."
+            echo "::error::HACS reports the version from manifest.json, not the tag, so releasing this"
+            echo "::error::would leave every install showing $MANIFEST_VERSION with an update always pending."
+            echo "::error::This is what happened to v1.1.6, which shipped a 1.1.5 manifest."
+            echo "::error::Delete the tag and use the Bump Version workflow, which keeps the two in step."
+            exit 1
+          fi
+
+          echo "Tag $GITHUB_REF_NAME matches manifest version $MANIFEST_VERSION."
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.ref_name }}
           generate_release_notes: true

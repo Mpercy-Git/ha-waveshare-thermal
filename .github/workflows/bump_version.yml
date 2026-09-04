@@ -61,6 +61,10 @@ jobs:
           git tag "v$VERSION"
           git push origin "v$VERSION"
 
+      # This looks like it duplicates release.yml, but it does not: GitHub does
+      # not start workflow runs from events created with the default
+      # GITHUB_TOKEN, so the tag pushed above never triggers release.yml.
+      # Removing this step would stop releases being created at all.
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:

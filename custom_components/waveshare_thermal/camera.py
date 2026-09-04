@@ -4,7 +4,7 @@ import logging
 import socket
 import struct
 import threading
-import time
+from collections import Counter
 from threading import Lock
 
 from PIL import Image, ImageDraw
@@ -21,6 +21,7 @@ _LOGGER = logging.getLogger(__name__)
 
 BUFFER_WIDTH = 80
 BUFFER_HEIGHT = 62  # Correct thermal resolution (not 63)
+THERMAL_ROWS = BUFFER_HEIGHT - 1  # Row 0 is discarded, the firmware corrupts it
 
 # Frame structure (final analysis):
 # - 160-byte header: "   #2808GFRA" + 148 zeros
@@ -34,6 +35,16 @@ FRAME_SIZE = FRAME_HEADER_SIZE + PAYLOAD_SIZE + FRAME_TAIL_SIZE  # 10256 bytes t
 FRAME_SYNC_PATTERN = b"   #2808GFRA" + (b"\x00" * 20)
 DEFAULT_ROW_SHIFT = 19
 AUTO_SHIFT_LEARN_FRAMES = 8
+
+# Rendering
+DISPLAY_SCALE = 4
+DISPLAY_WIDTH = BUFFER_WIDTH * DISPLAY_SCALE  # 320
+DISPLAY_HEIGHT = THERMAL_ROWS * DISPLAY_SCALE  # 244
+
+# Reconnect behaviour
+MIN_RECONNECT_DELAY = 5
+MAX_RECONNECT_DELAY = 60
+THREAD_JOIN_TIMEOUT = 5
 
 # Inferno-ish colormap (interpolated)
 COLORMAP = [
@@ -68,37 +79,43 @@ def circular_shift_row(row, shift):
     return row[-shift:] + row[:-shift]
 
 
-def score_shift(rows, shift):
-    """Lower score means smoother image continuity for this shift."""
-    shifted = [circular_shift_row(row, shift) for row in rows]
-    total = 0
-    count = 0
-
-    for row in shifted:
-        # Penalize seam discontinuity at column wrap.
-        total += abs(row[-1] - row[0])
-        count += 1
-
-    for idx in range(len(shifted) - 1):
-        r1 = shifted[idx]
-        r2 = shifted[idx + 1]
-        for x in range(BUFFER_WIDTH):
-            total += abs(r1[x] - r2[x])
-            count += 1
-
-    return total / max(count, 1)
-
-
 def estimate_best_shift(rows):
-    """Estimate best row shift for the current frame."""
-    best_shift = 0
-    best_score = None
-    for shift in range(BUFFER_WIDTH):
-        current = score_shift(rows, shift)
-        if best_score is None or current < best_score:
-            best_score = current
-            best_shift = shift
-    return best_shift
+    """Estimate the column rotation that restores horizontal continuity.
+
+    Every row arrives circularly rotated by the same unknown amount, so the
+    true left/right edge of the scene sits somewhere in the middle of the
+    frame as a vertical seam. Applying shift ``s`` pushes the boundary between
+    raw columns ``j - 1`` and ``j`` (with ``j = (BUFFER_WIDTH - s) % BUFFER_WIDTH``)
+    off the visible image, so the visible horizontal variation equals the row's
+    circular total variation minus that one column pair. The circular total is
+    identical for every shift, so the smoothest result is obtained by hiding
+    the largest column-to-column jump.
+
+    Row-to-row differences deliberately play no part: rotating every row by the
+    same amount permutes the columns identically, so that term is invariant to
+    ``s`` and cannot discriminate between candidate shifts.
+
+    The estimate is only as good as the scene: if a real edge in view is a
+    stronger discontinuity than the seam, that edge is hidden instead. Taking
+    the mode over AUTO_SHIFT_LEARN_FRAMES frames and falling back to
+    DEFAULT_ROW_SHIFT cover the ambiguous cases.
+    """
+    seam_strength = [0] * BUFFER_WIDTH
+    for row in rows:
+        for x in range(BUFFER_WIDTH):
+            # The jump between columns x-1 and x is hidden by this shift.
+            seam_strength[(BUFFER_WIDTH - x) % BUFFER_WIDTH] += abs(row[x - 1] - row[x])
+    return max(range(BUFFER_WIDTH), key=seam_strength.__getitem__)
+
+
+def _shutdown_socket(sock):
+    """Unblock a socket that another thread may be blocked reading from."""
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        # Already closed or never connected - nothing to interrupt.
+        pass
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -138,9 +155,12 @@ class WaveshareThermalCamera(Camera):
         self._row_shift = None
         self._shift_samples = []
         self._running = True
-        self._thread = threading.Thread(target=self._run_worker, name=f"ThermalCamera_{name}")
-        self._thread.daemon = True
-        self._thread.start()
+        self._stop_event = threading.Event()
+        self._socket = None
+        self._socket_lock = Lock()  # Guards the active socket reference
+        # The worker is started from async_added_to_hass so that a failed
+        # entity registration cannot leave an unreachable thread behind.
+        self._thread = None
 
     def get_min_temp(self):
         """Get minimum temperature."""
@@ -157,14 +177,33 @@ class WaveshareThermalCamera(Camera):
         with self._image_lock:
             return self._last_image
 
+    async def async_added_to_hass(self):
+        """Start the background reader once the entity is registered."""
+        await super().async_added_to_hass()
+        self._thread = threading.Thread(
+            target=self._run_worker,
+            name=f"ThermalCamera_{self._attr_name}",
+            daemon=True,
+        )
+        self._thread.start()
+
     async def async_will_remove_from_hass(self):
         """Stop the background thread when entity is removed."""
         self.stop()
 
+        thread = self._thread
+        if thread is None:
+            return
+
+        # Join off the event loop; the worker can take a moment to unwind.
+        await self.hass.async_add_executor_job(thread.join, THREAD_JOIN_TIMEOUT)
+        if thread.is_alive():
+            _LOGGER.warning("Thermal camera thread did not stop cleanly")
+
     def _create_placeholder_image(self):
         """Create a placeholder image."""
         try:
-            img = Image.new('RGB', (320, 244), color=(40, 44, 52))
+            img = Image.new('RGB', (DISPLAY_WIDTH, DISPLAY_HEIGHT), color=(40, 44, 52))
             draw = ImageDraw.Draw(img)
             # Simple fallback if font loading fails, though default is usually fine
             draw.text((80, 110), "Connecting...", fill=(255, 255, 255))
@@ -175,16 +214,29 @@ class WaveshareThermalCamera(Camera):
             _LOGGER.error("Error creating placeholder image: %s", e)
             return None
 
+    def _register_socket(self, sock):
+        """Track the active socket so stop() can interrupt a blocking recv."""
+        with self._socket_lock:
+            self._socket = sock
+
+        if sock is not None and not self._running:
+            # stop() may have run between the loop check and registration.
+            _shutdown_socket(sock)
+
     def _run_worker(self):
         """Background thread to read from TCP stream."""
-        reconnect_delay = 5
-        max_reconnect_delay = 60
+        reconnect_delay = MIN_RECONNECT_DELAY
         max_buffer_size = FRAME_SIZE * 10  # Allow buffering of up to 10 frames
         
         while self._running:
+            # Tracks whether this attempt ever produced data, so that a device
+            # accepting and immediately dropping connections backs off instead
+            # of being reconnected to in a tight loop.
+            healthy = False
             try:
                 # Open socket
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    self._register_socket(s)
                     s.settimeout(10.0)  # Connection timeout
                     _LOGGER.info("Attempting to connect to %s:%s", self._host, self._port)
                     try:
@@ -201,7 +253,6 @@ class WaveshareThermalCamera(Camera):
                     
                     _LOGGER.info("Successfully connected to thermal camera at %s:%s", self._host, self._port)
                     _LOGGER.info("Thermal stream should start automatically. Waiting for data...")
-                    reconnect_delay = 5  # Reset delay on successful connection
                     
                     # Set socket options for stability
                     try:
@@ -219,7 +270,7 @@ class WaveshareThermalCamera(Camera):
                     #   02DE - Parameters/checksum
                     try:
                         start_cmd = b"#000CWREGB10302DE"
-                        s.send(start_cmd)
+                        s.sendall(start_cmd)
                         _LOGGER.info("Sent start streaming command to camera")
                         
                         # Wait for acknowledgment response (17 bytes: "   #0008WREG01FD\x00")
@@ -254,6 +305,7 @@ class WaveshareThermalCamera(Camera):
                             if not first_data_received:
                                 _LOGGER.info("Received first data packet (%d bytes). Device is streaming!", len(chunk))
                                 first_data_received = True
+                                healthy = True
                             
                             data_buffer += chunk
                             
@@ -313,27 +365,26 @@ class WaveshareThermalCamera(Camera):
                                     all_values = struct.unpack(fmt, raw_data)
                                     
                                     # Skip first row (row 0): device firmware has corrupted first row.
-                                    values_61 = all_values[80:]  # 61 rows * 80 cols
+                                    thermal_values = all_values[BUFFER_WIDTH:]
                                     rows = [
-                                        list(values_61[row_idx * BUFFER_WIDTH:(row_idx + 1) * BUFFER_WIDTH])
-                                        for row_idx in range(61)
+                                        list(thermal_values[row_idx * BUFFER_WIDTH:(row_idx + 1) * BUFFER_WIDTH])
+                                        for row_idx in range(THERMAL_ROWS)
                                     ]
 
                                     # Learn best shift for first few frames, then lock it.
                                     if self._row_shift is None:
-                                        frame_shift = estimate_best_shift(rows)
-                                        self._shift_samples.append(frame_shift)
+                                        self._shift_samples.append(estimate_best_shift(rows))
+                                        # Apply the running mode rather than this frame's
+                                        # estimate, so the picture does not jitter while
+                                        # the shift is still being learned.
+                                        applied_shift = Counter(self._shift_samples).most_common(1)[0][0]
                                         if len(self._shift_samples) >= AUTO_SHIFT_LEARN_FRAMES:
-                                            self._row_shift = max(
-                                                set(self._shift_samples),
-                                                key=self._shift_samples.count,
-                                            )
+                                            self._row_shift = applied_shift
                                             _LOGGER.info(
                                                 "Locked thermal row shift to %d after %d samples",
                                                 self._row_shift,
                                                 len(self._shift_samples),
                                             )
-                                        applied_shift = frame_shift
                                     else:
                                         applied_shift = self._row_shift
 
@@ -352,22 +403,23 @@ class WaveshareThermalCamera(Camera):
                                     # Normal thermal range is roughly 2500-4000 raw (0-60°C)
                                     valid_values = [v for v in values if 0 < v < 10000]
                                     
-                                    if valid_values:
-                                        min_val = min(valid_values)
-                                        max_val = max(valid_values)
-                                    else:
-                                        # Fallback if all values are invalid (shouldn't happen)
-                                        min_val = 0
-                                        max_val = 65535
+                                    if not valid_values:
+                                        # Every pixel is invalid. Publishing a synthetic
+                                        # range here would push impossible temperatures
+                                        # into long-term statistics, so drop the frame.
+                                        _LOGGER.warning("Frame contained no valid thermal pixels. Skipping frame.")
+                                        continue
                                     
-                                    # Create Image from thermal data (80x61 - row 0 skipped)
-                                    img = Image.new('RGB', (BUFFER_WIDTH, 61))  # 80x61 (rows 1-61)
+                                    min_val = min(valid_values)
+                                    max_val = max(valid_values)
+                                    
+                                    # Create Image from thermal data (row 0 skipped)
+                                    img = Image.new('RGB', (BUFFER_WIDTH, THERMAL_ROWS))
                                     pixels_rgb = [get_color(v, min_val, max_val) for v in values]
                                     img.putdata(pixels_rgb)
                                     
                                     # Resize for better visibility in HA (maintain aspect ratio)
-                                    # 80x61 -> scale to width 320, height maintains ratio
-                                    img = img.resize((320, 244), resample=Image.NEAREST)
+                                    img = img.resize((DISPLAY_WIDTH, DISPLAY_HEIGHT), resample=Image.NEAREST)
                                     
                                     # Draw stats
                                     draw = ImageDraw.Draw(img)
@@ -407,23 +459,41 @@ class WaveshareThermalCamera(Camera):
                             _LOGGER.warning("Check: 1) Is device powered on? 2) USB connected (for sensor initialization)? 3) Thermal camera firmware running?")
                             _LOGGER.warning("Try power-cycling the device or checking ESP32 serial logs for errors. Reconnecting...")
                             break
+                        except OSError as e:
+                            if not self._running:
+                                # Socket was shut down by stop(); this is expected.
+                                break
+                            _LOGGER.error("Socket recv error: %s", e)
+                            break
                         except Exception as e:
                             _LOGGER.error("Socket recv error: %s", e)
                             break
                             
             except Exception as e:
-                _LOGGER.error("Error connecting to thermal camera: %s", e)
                 if self._running:
-                    _LOGGER.info("Reconnecting in %d seconds...", reconnect_delay)
-                    time.sleep(reconnect_delay)
-                    # Exponential backoff: increase delay up to max
-                    reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
-                    reconnect_delay = int(reconnect_delay)
+                    _LOGGER.error("Error connecting to thermal camera: %s", e)
+            finally:
+                self._register_socket(None)
+
+            if not self._running:
+                break
+
+            # Applies to every disconnect, not just those raising an exception:
+            # a clean EOF or a read timeout must back off too.
+            if healthy:
+                reconnect_delay = MIN_RECONNECT_DELAY
+            _LOGGER.info("Reconnecting in %d seconds...", reconnect_delay)
+            self._stop_event.wait(reconnect_delay)
+            if not healthy:
+                # Exponential backoff: increase delay up to max
+                reconnect_delay = min(int(reconnect_delay * 1.5), MAX_RECONNECT_DELAY)
 
     def stop(self):
-        """Stop the background thread."""
+        """Signal the background thread to stop and interrupt any blocking I/O."""
         self._running = False
-        # Wait for thread to finish (max 5 seconds)
-        self._thread.join(timeout=5)
-        if self._thread.is_alive():
-            _LOGGER.warning("Thermal camera thread did not stop cleanly")
+        self._stop_event.set()
+
+        with self._socket_lock:
+            sock = self._socket
+        if sock is not None:
+            _shutdown_socket(sock)

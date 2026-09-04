@@ -77,24 +77,56 @@ class WaveshareThermalOptionsFlow(config_entries.OptionsFlow):
         """Initialize options flow."""
         self._config_entry = config_entry
 
+    def _host_used_by_other_entry(self, host: str) -> bool:
+        """Check whether a different config entry already uses this host."""
+        return any(
+            entry.unique_id == host
+            for entry in self.hass.config_entries.async_entries(DOMAIN)
+            if entry.entry_id != self._config_entry.entry_id
+        )
+
     async def async_step_init(self, user_input: dict | None = None) -> FlowResult:
         """Manage the integration options."""
         errors = {}
 
-        if user_input is not None:
-            try:
-                await validate_input(self.hass, user_input)
-            except ConnectionError:
-                errors["base"] = "cannot_connect"
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("Unexpected exception in options flow")
-                errors["base"] = "unknown"
-            else:
-                return self.async_create_entry(title="", data=user_input)
-
         current_host = self._config_entry.options.get(CONF_HOST, self._config_entry.data.get(CONF_HOST, ""))
         current_port = self._config_entry.options.get(CONF_PORT, self._config_entry.data.get(CONF_PORT, DEFAULT_PORT))
         current_name = self._config_entry.options.get(CONF_NAME, self._config_entry.data.get(CONF_NAME, DEFAULT_NAME))
+
+        if user_input is not None:
+            new_host = user_input[CONF_HOST]
+            new_port = user_input.get(CONF_PORT, DEFAULT_PORT)
+
+            if (new_host, new_port) == (current_host, current_port):
+                # Nothing to probe. The device serves a single client at a
+                # time, so opening a test connection here would drop the
+                # running stream just to rename the entity.
+                return self.async_create_entry(title="", data=user_input)
+
+            if self._host_used_by_other_entry(new_host):
+                errors["base"] = "already_configured"
+            else:
+                try:
+                    await validate_input(self.hass, user_input)
+                except ConnectionError:
+                    errors["base"] = "cannot_connect"
+                except Exception:  # pylint: disable=broad-except
+                    _LOGGER.exception("Unexpected exception in options flow")
+                    errors["base"] = "unknown"
+                else:
+                    if new_host != self._config_entry.unique_id:
+                        # Keep the duplicate-detection identity in step with
+                        # the host the entry actually talks to.
+                        self.hass.config_entries.async_update_entry(
+                            self._config_entry, unique_id=new_host
+                        )
+                    return self.async_create_entry(title="", data=user_input)
+
+            # Validation failed: re-show the form with what was submitted
+            # rather than reverting the fields to the stored values.
+            current_host = user_input.get(CONF_HOST, current_host)
+            current_port = user_input.get(CONF_PORT, current_port)
+            current_name = user_input.get(CONF_NAME, current_name)
 
         options_schema = vol.Schema(
             {

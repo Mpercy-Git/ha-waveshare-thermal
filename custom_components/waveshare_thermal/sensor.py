@@ -21,14 +21,8 @@ async def async_setup_entry(
     name = entry.options.get(CONF_NAME, entry.data.get(CONF_NAME) or entry.title)
     unique_id = entry.entry_id
 
-    # Get the camera entity to access temperature data
-    camera_entity = None
-    if DOMAIN in hass.data and "entities" in hass.data[DOMAIN]:
-        camera_entity = hass.data[DOMAIN]["entities"].get(unique_id)
-
-    if camera_entity is None:
-        _LOGGER.warning("Could not find camera entity for thermal sensors")
-
+    # The camera entity is resolved lazily by each sensor: the camera and
+    # sensor platforms are set up concurrently, so it may not exist yet.
     async_add_entities(
         [
             ThermalCameraMinTempSensor(name, unique_id),

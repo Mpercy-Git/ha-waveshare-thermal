@@ -23,11 +23,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: config_entries.ConfigEnt
 
 async def async_unload_entry(hass: HomeAssistant, entry: config_entries.ConfigEntry) -> bool:
     """Unload a config entry."""
-    # Clean up stored entity references
-    if DOMAIN in hass.data and "entities" in hass.data[DOMAIN]:
-        hass.data[DOMAIN]["entities"].pop(entry.entry_id, None)
+    unload_ok = await hass.config_entries.async_unload_platforms(
+        entry, [Platform.CAMERA, Platform.SENSOR]
+    )
 
-    return await hass.config_entries.async_unload_platforms(entry, [Platform.CAMERA, Platform.SENSOR])
+    # Only drop the stored entity references once the platforms are really
+    # gone; a failed unload leaves the entities in place and still in use.
+    if unload_ok:
+        entities = hass.data.get(DOMAIN, {}).get("entities")
+        if entities is not None:
+            entities.pop(entry.entry_id, None)
+            if not entities:
+                hass.data.pop(DOMAIN, None)
+
+    return unload_ok
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: config_entries.ConfigEntry) -> None:

@@ -17,22 +17,49 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate version
+        run: |
+          VERSION="${{ inputs.version }}"
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$VERSION' is not a x.y.z version number."
+            exit 1
+          fi
+
+          # Check the tag before writing anything, so a version that has
+          # already been released cannot leave main bumped but untagged.
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "::error::Tag v$VERSION already exists. Pick a version that has not been released."
+            exit 1
+          fi
+
       - name: Update manifest.json
         run: |
           VERSION="${{ inputs.version }}"
           # Use jq to update the version field safely
           tmp=$(mktemp)
           jq --arg v "$VERSION" '.version = $v' custom_components/waveshare_thermal/manifest.json > "$tmp" && mv "$tmp" custom_components/waveshare_thermal/manifest.json
-          
+
       - name: Commit and Push
         run: |
+          VERSION="${{ inputs.version }}"
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add custom_components/waveshare_thermal/manifest.json
-          git commit -m "Bump version to ${{ inputs.version }}"
-          git tag "v${{ inputs.version }}"
-          git push
-          git push origin "v${{ inputs.version }}"
+
+          # The manifest can already carry this version when re-running after a
+          # partial failure. git commit exits 1 on an empty commit, so ask first
+          # and go straight to tagging rather than failing the run.
+          if git diff --cached --quiet; then
+            echo "manifest.json is already at $VERSION; tagging the current commit."
+          else
+            git commit -m "Bump version to $VERSION"
+            git push
+          fi
+
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
